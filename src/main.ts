@@ -1,0 +1,251 @@
+import * as THREE from 'three';
+import { MeshBasicNodeMaterial } from 'three/webgpu';
+import { 
+  attribute, float, positionLocal, vec3, vec4, vec2, uv, distance, smoothstep,
+  fwidth, hash, instanceIndex, Discard, max, min, userData, uint, mix,
+  log2, clamp, pow, uniformArray, uniform, select, length, floor, varying
+} from 'three/tsl';
+import { Renderer } from './core/Renderer';
+import { PMTilesClient } from './PMTilesClient';
+import type { BoundingBox, TileData } from './PMTilesClient';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import Stats from 'three/examples/jsm/libs/stats.module.js';
+const TILE_SERVER_URL = '/gaia.pmtiles';
+
+
+
+let is2DMode = true; // 2D by default
+import { Scatterplot } from './Scatterplot';
+let rendererInstance: Renderer | null = null;
+let scatterplotInstance: Scatterplot | null = null;
+
+function setupModeSwap() {
+  const btn = document.getElementById('swap-mode-btn');
+  if (btn) {
+    btn.addEventListener('click', () => {
+      is2DMode = !is2DMode;
+      if (scatterplotInstance) {
+        scatterplotInstance.layerSpacingUniform.value = is2DMode ? 0.0 : 1.0;
+      }
+      if (rendererInstance) {
+        rendererInstance.set2DMode(is2DMode);
+      }
+      btn.innerText = `Mode: ${is2DMode ? '2D' : '2.5D'}`;
+    });
+  }
+}
+
+
+
+async function init() {
+  const container = document.getElementById('app')!;
+  const uiText = document.querySelector('#ui p')!;
+
+  setupModeSwap();
+
+  if (!navigator.gpu) {
+    uiText.textContent = 'WebGPU is not supported by your browser.';
+    return;
+  }
+  const adapter = await navigator.gpu.requestAdapter();
+  const limits = adapter ? adapter.limits : undefined;
+  const rendererWrapper = new Renderer(container, limits);
+  await rendererWrapper.init();
+
+  const stats = new Stats();
+  stats.showPanel(0); // 0: fps, 1: ms, 2: mb, 3+: custom
+  // Position it in the top right so it doesn't overlap the UI
+  stats.dom.style.position = 'absolute';
+  stats.dom.style.top = '0px';
+  stats.dom.style.right = '0px';
+  stats.dom.style.left = 'auto'; // override default left
+  document.body.appendChild(stats.dom);
+
+  const rootBounds = { minX: -2.0, maxX: 2.0, minY: -1.0, maxY: 1.0 };
+  
+  const tileManager = new PMTilesClient(TILE_SERVER_URL, rootBounds);
+  (window as any).tileManagerInstance = tileManager;
+  
+  uiText.innerHTML = `WebGPU is supported!<br/>Streaming Quadtree Tiles...`;
+
+  const scatterplot = new Scatterplot(rendererWrapper.scene, rendererWrapper, rootBounds);
+  
+  rendererInstance = rendererWrapper;
+  scatterplotInstance = scatterplot;
+
+  const mouse = new THREE.Vector2();
+
+  const tooltip = document.createElement('div');
+  tooltip.style.position = 'absolute';
+  tooltip.style.background = 'rgba(0,0,0,0.8)';
+  tooltip.style.color = 'white';
+  tooltip.style.padding = '5px';
+  tooltip.style.borderRadius = '5px';
+  tooltip.style.display = 'none';
+  tooltip.style.pointerEvents = 'none';
+  tooltip.style.zIndex = '1000';
+  document.body.appendChild(tooltip);
+
+  const raycaster = new THREE.Raycaster();
+
+  async function performGPUPicking(mouseX: number, mouseY: number) {
+    if (!scatterplot.pickingRenderTarget.texture) return;
+    
+    // 1. Position the 1x1 picking camera perfectly under the mouse cursor
+    const pickingCamera = rendererWrapper.camera.clone() as THREE.OrthographicCamera;
+    pickingCamera.setViewOffset(
+        window.innerWidth, window.innerHeight,
+        mouseX, mouseY,
+        1, 1
+    );
+
+    // 2. Hide hoverMesh during picking
+    scatterplot.hoverMesh.visible = false;
+
+    // 3. Override per-mesh picking materials
+    const originalMaterials = new Map<THREE.Mesh, THREE.Material>();
+    rendererWrapper.scene.traverse((child) => {
+        if (child instanceof THREE.Mesh && child.userData.pickingMaterial) {
+            originalMaterials.set(child, child.material);
+            child.material = child.userData.pickingMaterial;
+        }
+    });
+
+    // 4. Render directly to the 1x1 Render Target
+    rendererWrapper.renderer.setRenderTarget(scatterplot.pickingRenderTarget);
+    await rendererWrapper.renderer.renderAsync(rendererWrapper.scene, pickingCamera);
+
+    // 5. Restore scene state
+    rendererWrapper.renderer.setRenderTarget(null);
+    for (const [mesh, origMat] of originalMaterials.entries()) {
+        mesh.material = origMat;
+    }
+
+    // 6. Read back the exact 4 bytes asynchronously!
+    const buffer = await rendererWrapper.renderer.readRenderTargetPixelsAsync(
+        scatterplot.pickingRenderTarget, 
+        0, 0, 1, 1
+    );
+
+    if (!buffer) return;
+
+    // Decode: RGBA -> globalId
+    // Background pixels have Alpha=0. Valid picked IDs have Alpha >= 1 due to our 0x01000000 offset.
+    if (buffer[3] === 0) {
+        scatterplot.updateHover(-1, () => {});
+        tooltip.style.display = 'none';
+        return;
+    }
+
+    const decodedId = buffer[0] | (buffer[1] << 8) | (buffer[2] << 16) | (buffer[3] << 24);
+    const globalId = decodedId - 0x01000000;
+
+    scatterplot.updateHover(globalId, (hoverHtml) => {
+        tooltip.style.display = 'block';
+        tooltip.style.left = mouseX + 15 + 'px';
+        tooltip.style.top = mouseY + 15 + 'px';
+        tooltip.style.fontFamily = 'monospace';
+        tooltip.innerHTML = hoverHtml;
+    });
+  }
+
+  // DISABLED TEMPORARILY: Hover tooltip and magnification
+  /*
+  let isPickingScheduled = false;
+  window.addEventListener('mousemove', (e) => {
+    mouse.x = e.clientX;
+    mouse.y = e.clientY;
+    if (!isPickingScheduled) {
+      isPickingScheduled = true;
+      performGPUPicking(mouse.x, mouse.y).then(() => {
+          isPickingScheduled = false;
+      }).catch(err => {
+          console.error("Picking error", err);
+          isPickingScheduled = false;
+      });
+    }
+  });
+  */
+
+  // Connect TileManager's Cache Eviction to Scatterplot's GPU slots
+  tileManager.onTileUnloaded = (tileId: string) => {
+      scatterplot.unloadTile(tileId);
+  };
+
+  rendererWrapper.renderer.setAnimationLoop(() => {
+    try {
+      const t0 = performance.now();
+      
+      // 1. Get frustum bounds from camera
+      const cam = rendererWrapper.camera as THREE.OrthographicCamera;
+      const frustumBox: BoundingBox = {
+         minX: cam.position.x + cam.left / cam.zoom,
+         maxX: cam.position.x + cam.right / cam.zoom,
+         minY: cam.position.y + cam.bottom / cam.zoom,
+         maxY: cam.position.y + cam.top / cam.zoom
+      };
+      
+      const currentMaxIx = scatterplot.calculateMaxIx(cam);
+      
+      const currentZoom = Math.log2(Math.max(1.0, cam.zoom));
+      // Artificially fetch 2 zoom levels deeper to guarantee a densely populated visual field
+      // e.g. at zoom=1 (home), it will fetch z=0, z=1, and z=2 (1 + 4 + 16 = 21 tiles)
+      const z = Math.max(2, Math.min(14, Math.floor(currentZoom) + 2));
+      
+      // 2. Fetch visible tiles with CPU Zero-Cost Culling
+      const visibleTiles = tileManager.getVisibleTiles(frustumBox, z);
+      
+      const t1 = performance.now();
+      
+      // 3. Update scatterplot geometry and compute nodes
+      scatterplot.updateTiles(visibleTiles);
+      
+      const t2 = performance.now();
+      
+      let totalPoints = 0;
+      for (const t of visibleTiles) totalPoints += t.numRows;
+      uiText.innerHTML = `Streaming Quadtree<br/>Tiles rendered: ${visibleTiles.length}<br/>Points: ${totalPoints}`;
+
+      // 4. Update Camera
+      scatterplot.updateCamera(rendererWrapper.camera);
+
+      const t3 = performance.now();
+
+      // 5. Render Main Scene
+      rendererWrapper.render();
+      
+      const t4 = performance.now();
+      stats.update();
+      
+      // TELEMETRY
+      const w = window as any;
+      w.perfAccum = w.perfAccum || { frames: 0, getVisibleTiles: 0, updateTiles: 0, updateCam: 0, render: 0, totalFrame: 0, lastReport: performance.now() };
+      w.perfAccum.frames++;
+      w.perfAccum.getVisibleTiles += (t1 - t0);
+      w.perfAccum.updateTiles += (t2 - t1);
+      w.perfAccum.updateCam += (t3 - t2);
+      w.perfAccum.render += (t4 - t3);
+      w.perfAccum.totalFrame += (t4 - t0);
+      
+      if (t4 - w.perfAccum.lastReport >= 1000) {
+         const p = w.perfAccum;
+         const data = {
+            fps: p.frames,
+            tiles: visibleTiles.length,
+            getVisibleTiles: (p.getVisibleTiles / p.frames).toFixed(1),
+            updateTiles: (p.updateTiles / p.frames).toFixed(1),
+            updateCam: (p.updateCam / p.frames).toFixed(1),
+            render: (p.render / p.frames).toFixed(1),
+            totalFrame: (p.totalFrame / p.frames).toFixed(1)
+         };
+         // fetch('http://localhost:8081/log', { method: 'POST', body: JSON.stringify(data) }).catch(e => {});
+         w.perfAccum = { frames: 0, getVisibleTiles: 0, updateTiles: 0, updateCam: 0, render: 0, totalFrame: 0, lastReport: t4 };
+      }
+    } catch (err) {
+      console.error("Animation loop crash:", err);
+      rendererWrapper.renderer.setAnimationLoop(null); // Stop loop to avoid 3000 errors
+    }
+  });
+}
+
+init().catch(console.error);

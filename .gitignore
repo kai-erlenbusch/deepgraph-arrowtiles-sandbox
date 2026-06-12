@@ -1,0 +1,13 @@
+node_modules/
+.DS_Store
+*.parquet
+*.pmtiles
+*.feather
+*.gz
+*.csv
+data/
+logs/
+.duckdb/
+.env
+dist/
+build/
