@@ -331,28 +331,44 @@ export class Scatterplot {
         }
         processedTiles++;
         
-        geo.instanceCount = tile.numRows;
+        const numItems = Math.min(tile.numRows, this.rowsPerTile);
+        geo.instanceCount = numItems;
         
         if (tile.xBuffer) {
-            geo.setAttribute('offsetX', new THREE.InstancedBufferAttribute(new Float32Array(tile.xBuffer), 1));
-            geo.setAttribute('offsetY', new THREE.InstancedBufferAttribute(new Float32Array(tile.yBuffer!), 1));
+            const ox = geo.getAttribute('offsetX') as THREE.InstancedBufferAttribute;
+            (ox.array as Float32Array).set(tile.xBuffer.slice(0, numItems));
+            ox.needsUpdate = true;
 
-            const ixBuf = tile.ixBuffer || new Float32Array(tile.numRows).buffer;
-            geo.setAttribute('pointIx', new THREE.InstancedBufferAttribute(new Float32Array(ixBuf), 1));
+            const oy = geo.getAttribute('offsetY') as THREE.InstancedBufferAttribute;
+            (oy.array as Float32Array).set(tile.yBuffer!.slice(0, numItems));
+            oy.needsUpdate = true;
+
+            const ixBuf = tile.ixBuffer || new Float32Array(numItems);
+            const ix = geo.getAttribute('pointIx') as THREE.InstancedBufferAttribute;
+            (ix.array as Float32Array).set(ixBuf.slice(0, numItems));
+            ix.needsUpdate = true;
         }
         
         if (tile.colorBuffer) {
             const currentTime = performance.now() / 1000.0;
-            const spawnTimeArray = new Float32Array(tile.numRows).fill(currentTime);
+            const spawnTimeArray = new Float32Array(numItems).fill(currentTime);
 
-            geo.setAttribute('instanceColor', new THREE.InstancedBufferAttribute(new Float32Array(tile.colorBuffer), 1));
-            geo.setAttribute('instanceSize', new THREE.InstancedBufferAttribute(new Float32Array(tile.sizeBuffer!), 1));
-            geo.setAttribute('spawnTime', new THREE.InstancedBufferAttribute(spawnTimeArray, 1));
+            const ic = geo.getAttribute('instanceColor') as THREE.InstancedBufferAttribute;
+            (ic.array as Float32Array).set(tile.colorBuffer.slice(0, numItems));
+            ic.needsUpdate = true;
+
+            const is = geo.getAttribute('instanceSize') as THREE.InstancedBufferAttribute;
+            (is.array as Float32Array).set(tile.sizeBuffer!.slice(0, numItems));
+            is.needsUpdate = true;
+
+            const st = geo.getAttribute('spawnTime') as THREE.InstancedBufferAttribute;
+            (st.array as Float32Array).set(spawnTimeArray);
+            st.needsUpdate = true;
         }
         
         if (tile.hoverBuffer) {
             const offset = slot * this.rowsPerTile;
-            this.globalHoverBuffer.set(new Int32Array(tile.hoverBuffer), offset * 3);
+            this.globalHoverBuffer.set(tile.hoverBuffer.slice(0, numItems), offset * 3);
         }
 
         tile.needsUpdate = false;

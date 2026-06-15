@@ -1,12 +1,15 @@
 import duckdb
+import time
+
 con = duckdb.connect(config={'allow_unsigned_extensions': 'true'})
 con.execute("LOAD 'D:/exploratory/duckdb-extension/duckdb-arrowtiles/target/release/arrowtiles.duckdb_extension'")
-print("Running query with LIMIT 10...")
 udf_calls = ',\n'.join([f"hilbert_normalized(x_norm, y_norm, {z}::UTINYINT) AS t{z}" for z in range(15)])
+
 query = f"""
     WITH raw_data AS (
         SELECT ra, dec, magnitude, bv, RADIANS(ra) AS ra_rad, RADIANS(dec) AS dec_rad, RADIANS(192.85948) AS a_g, RADIANS(27.12825) AS d_g, RADIANS(32.93192) AS l_n
-        FROM read_parquet('D:/exploratory/duckdb-extension/deepgraph-arrowtiles-sandbox/s3_cache/batch_000.parquet') LIMIT 10
+        FROM read_parquet('D:/exploratory/duckdb-extension/deepgraph-arrowtiles-sandbox/s3_cache/batch_000.parquet')
+        LIMIT 1000000
     ),
     galactic AS (
         SELECT magnitude, bv, ASIN(SIN(d_g)*SIN(dec_rad) + COS(d_g)*COS(dec_rad)*COS(ra_rad - a_g)) AS b_rad, l_n + ATAN2(COS(dec_rad)*SIN(ra_rad - a_g), COS(d_g)*SIN(dec_rad) - SIN(d_g)*COS(dec_rad)*COS(ra_rad - a_g)) AS l_rad_raw
@@ -21,6 +24,10 @@ query = f"""
         FROM normalized
     )
     SELECT x_norm, y_norm, CAST(magnitude AS FLOAT) AS abs_m, CAST(bv AS FLOAT) AS bp_rp, {udf_calls}
-    FROM gaia_sampled ORDER BY magnitude ASC
+    FROM gaia_sampled
 """
-print(con.execute(query).fetchall())
+
+start = time.time()
+con.execute(query).fetchall()
+end = time.time()
+print(f"Processed 1M rows in {end-start:.2f} seconds")

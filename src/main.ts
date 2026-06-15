@@ -10,7 +10,7 @@ import { PMTilesClient } from './PMTilesClient';
 import type { BoundingBox, TileData } from './PMTilesClient';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import Stats from 'three/examples/jsm/libs/stats.module.js';
-const TILE_SERVER_URL = '/gaia.pmtiles';
+const TILE_SERVER_URL = 'http://localhost:8080/gaia.pmtiles';
 
 
 
