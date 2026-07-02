@@ -3,7 +3,7 @@ import { MeshBasicNodeMaterial, StorageInstancedBufferAttribute } from 'three/we
 // @ts-ignore - TSL types are highly experimental and incomplete
 import { 
   attribute, float, positionLocal, vec3, vec4, vec2, uv, distance, smoothstep,
-  hash, instanceIndex, max, select, uint, mix, clamp, log2, uniform, varying, instancedArray, storage, cameraProjectionMatrix, cameraViewMatrix, atomicAdd, time, userData
+  hash, instanceIndex, max, select, uint, mix, clamp, log2, uniform, varying, instancedArray, storage, cameraProjectionMatrix, cameraViewMatrix, atomicAdd, time, userData, sqrt
 } from 'three/tsl';
 import { Renderer } from './core/Renderer';
 import type { BoundingBox, TileData } from './PMTilesClient';
