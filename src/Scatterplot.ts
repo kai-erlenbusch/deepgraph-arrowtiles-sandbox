@@ -140,7 +140,7 @@ export class Scatterplot {
     const instanceSize = mix(float(1.2), float(3.0), zoomT).mul(computedSize);
     
     const isVisible = rawMag.greaterThan(0.0)
-                      .and(pointIx.lessThanEqual(this.maxIxUniform));
+                      .and(isTokens.or(safeRawMag.lessThanEqual(this.maxMagUniform)));
     const safeSize = select(isVisible, targetPixels.mul(this.rendererWrapper.worldUnitsPerPixelUniform).mul(instanceSize), float(0.0));
     // Use a square-root curve (Curve C) so that opacity jumps up quickly to keep Z=2 and Z=3 
     // relatively close in brightness, but flatten out so we don't wash out at high zooms.
