@@ -137,14 +137,14 @@ export class Scatterplot {
     const gaiaSize = max(float(0.05), float(21.0).sub(safeRawMag).div(float(10.0)));
     const computedSize = select(isTokens, tokenSize, gaiaSize);
     
-    const instanceSize = mix(float(1.2), float(3.0), zoomT).mul(computedSize);
+    const instanceSize = mix(float(1.8), float(3.0), zoomT).mul(computedSize);
     
     const isVisible = rawMag.greaterThan(0.0)
                       .and(pointIx.lessThanEqual(this.maxIxUniform));
     const safeSize = select(isVisible, targetPixels.mul(this.rendererWrapper.worldUnitsPerPixelUniform).mul(instanceSize), float(0.0));
     
-    // Increased base opacity from 0.005 to 0.02 to make Z=2 (zoomed out) much brighter
-    const baseOpacity = mix(float(0.02), float(0.15), zoomT);
+    // Increased base opacity to make Z=2 (zoomed out) much brighter
+    const baseOpacity = mix(float(0.08), float(0.20), zoomT);
     const dynamicOpacity = clamp(baseOpacity, float(1.0 / 255.0), float(1.0));
 
     const val = safeRawColor;
