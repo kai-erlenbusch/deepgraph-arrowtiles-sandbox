@@ -13,3 +13,5 @@ __pycache__/
 .env
 dist/
 build/
+duckdb_temp/
+s3_cache/

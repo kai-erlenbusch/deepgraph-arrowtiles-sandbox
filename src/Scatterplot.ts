@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { MeshBasicNodeMaterial, StorageInstancedBufferAttribute } from 'three/webgpu';
+// @ts-ignore - TSL types are highly experimental and incomplete
 import { 
   attribute, float, positionLocal, vec3, vec4, vec2, uv, distance, smoothstep,
   hash, instanceIndex, max, select, uint, mix, clamp, log2, uniform, varying, instancedArray, storage, cameraProjectionMatrix, cameraViewMatrix, atomicAdd, time, userData
@@ -11,8 +12,8 @@ import type { BoundingBox, TileData } from './PMTilesClient';
 export class Scatterplot {
   public scene: THREE.Scene;
   
-  public maxTiles = 800;
-  public rowsPerTile = 100000;
+  public maxTiles = 200;
+  public rowsPerTile = 262144;
   public maxGlobalRows = this.maxTiles * this.rowsPerTile;
   
   public slotMeshes: THREE.Mesh[] = [];
@@ -27,7 +28,8 @@ export class Scatterplot {
   public hoverMesh: THREE.Mesh;
   public hoverColorUniform: any;
   public layerSpacingUniform = uniform(0.0);
-  public maxIxUniform = uniform(100000000.0);
+  public maxMagUniform = uniform(15.0);
+  public maxIxUniform = uniform(100000000.0); // Kept for API compatibility if needed
   public vpMatrixUniform = uniform(new THREE.Matrix4());
   private rootArea: number;
   private rendererWrapper: Renderer;
@@ -98,12 +100,12 @@ export class Scatterplot {
 
   private createMainMaterial() {
     // Abstracted TSL inputs allow ALL 800 meshes to perfectly share this 1 Pipeline!
-    const rawColor = attribute('instanceColor', 'float');
-    const rawMag = attribute('instanceSize', 'float');
-    const offsetX = attribute('offsetX', 'float');
-    const offsetY = attribute('offsetY', 'float');
-    const pointIx = attribute('pointIx', 'float');
-    const spawnTime = attribute('spawnTime', 'float');
+    const rawColor = float(attribute('instanceColor', 'float'));
+    const rawMag = float(attribute('instanceSize', 'float'));
+    const offsetX = float(attribute('offsetX', 'float'));
+    const offsetY = float(attribute('offsetY', 'float'));
+    const pointIx = float(attribute('pointIx', 'float'));
+    const spawnTime = float(attribute('spawnTime', 'float'));
 
     const mat = new MeshBasicNodeMaterial({
       transparent: true,
@@ -134,16 +136,14 @@ export class Scatterplot {
     const gaiaSize = max(float(0.05), float(21.0).sub(safeRawMag).div(float(10.0)));
     const computedSize = select(isTokens, tokenSize, gaiaSize);
     
-    const instanceSize = mix(float(0.8), float(3.0), zoomT).mul(computedSize);
+    const instanceSize = mix(float(1.2), float(3.0), zoomT).mul(computedSize);
     
     const isVisible = rawMag.greaterThan(0.0)
                       .and(pointIx.lessThanEqual(this.maxIxUniform));
     const safeSize = select(isVisible, targetPixels.mul(this.rendererWrapper.worldUnitsPerPixelUniform).mul(instanceSize), float(0.0));
     
-    // GAIA needs extreme low alpha to allow points to sum without washing out
-    // Since we fixed the quadtree fetch, we are properly streaming millions of points again.
-    // We keep opacity very low to prevent additive blowout on dense clusters.
-    const baseOpacity = mix(float(0.005), float(0.12), zoomT);
+    // Increased base opacity from 0.005 to 0.02 to make Z=2 (zoomed out) much brighter
+    const baseOpacity = mix(float(0.02), float(0.15), zoomT);
     const dynamicOpacity = clamp(baseOpacity, float(1.0 / 255.0), float(1.0));
 
     const val = safeRawColor;
@@ -196,10 +196,10 @@ export class Scatterplot {
   }
 
   private createPickingMaterial() {
-    const rawMag = attribute('instanceSize', 'float');
-    const offsetX = attribute('offsetX', 'float');
-    const offsetY = attribute('offsetY', 'float');
-    const pointIx = attribute('pointIx', 'float');
+    const rawMag = float(float(attribute('instanceSize', 'float')));
+    const offsetX = float(float(attribute('offsetX', 'float')));
+    const offsetY = float(float(attribute('offsetY', 'float')));
+    const pointIx = float(float(attribute('pointIx', 'float')));
 
     const mat = new MeshBasicNodeMaterial({
       transparent: true,
@@ -227,14 +227,14 @@ export class Scatterplot {
     mat.colorNode = vec3(r, g, b);
     
     const isVisible = rawMag.greaterThan(0.0)
-                      .and(pointIx.lessThanEqual(this.maxIxUniform));
+                      .and(rawMag.lessThanEqual(this.maxMagUniform));
     const distanceToCenter = distance(uv(), vec2(0.5));
     const shouldDiscard = distanceToCenter.greaterThan(0.5).or(isVisible.not());
     mat.opacityNode = select(shouldDiscard, float(0.0), a);
     
     const zoomT = this.rendererWrapper.zoomTUniform;
-    const targetPixels = mix(float(1.0), float(2.0), zoomT);
-    const instanceSize = mix(float(0.8), float(3.0), zoomT).mul(rawMag);
+    const targetPixels = mix(float(0.8), float(2.0), zoomT);
+    const instanceSize = mix(float(0.6), float(2.5), zoomT).mul(rawMag);
     const safeSize = targetPixels.mul(this.rendererWrapper.worldUnitsPerPixelUniform).mul(instanceSize);
 
     const mappedX = offsetX.mul(float(4.0)).sub(float(2.0));
@@ -254,17 +254,25 @@ export class Scatterplot {
     return 3000000 * areaRatio;
   }
 
+  private vp = new THREE.Matrix4();
+
   public updateCamera(camera: THREE.Camera) {
-    const vp = new THREE.Matrix4();
-    vp.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-    this.vpMatrixUniform.value.copy(vp);
+    this.vp.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    this.vpMatrixUniform.value.copy(this.vp);
     
-    // Dynamic Density Culling (Progressive Subsampling)
-    const orthoCam = camera as THREE.OrthographicCamera;
     const currentZoom = Math.log2(Math.max(1.0, camera.zoom));
-    const zoomT = Math.max(0.0, Math.min(1.0, currentZoom / 6.0));
     
-    this.maxIxUniform.value = this.calculateMaxIx(orthoCam);
+    // Map zoom level to a global magnitude cutoff!
+    // Zoom 0 (fully out): Show up to magnitude 14 (plenty of stars, fast rendering)
+    // Zoom 6 (fully in): Show up to magnitude 21 (all stars visible)
+    if (!this.maxMagUniform) {
+        console.error("maxMagUniform is undefined!");
+    } else {
+        const minMag = 14.0;
+        const maxMag = 21.0;
+        const zoomRatio = Math.max(0.0, Math.min(1.0, currentZoom / 5.0));
+        this.maxMagUniform.value = minMag + (maxMag - minMag) * zoomRatio;
+    }
   }
 
     private getFreeSlot(): number {
@@ -286,12 +294,13 @@ export class Scatterplot {
         }
     }
 
-    public updateTiles(tiles: TileData[]) {
+    public updateTiles(tiles: TileData[]): boolean {
         const currentKeys = new Set(tiles.map(t => t.key));
         
         // PCIe Throttling: Lower max updates to prevent 30MB bandwidth spikes during fast panning
         const MAX_PROCESS_TILES = 4; 
         let processedTiles = 0;
+        let hasPendingUpdates = false;
 
         // 1. Identify tiles that are currently on GPU but no longer active
         for (const [key, slot] of this.tileKeyToSlot.entries()) {
@@ -327,6 +336,7 @@ export class Scatterplot {
       if (tile.needsUpdate) {
         if (processedTiles >= MAX_PROCESS_TILES) {
              this.slotMeshes[slot].visible = geo.instanceCount > 0;
+             hasPendingUpdates = true;
              continue;
         }
         processedTiles++;
@@ -336,16 +346,16 @@ export class Scatterplot {
         
         if (tile.xBuffer) {
             const ox = geo.getAttribute('offsetX') as THREE.InstancedBufferAttribute;
-            (ox.array as Float32Array).set(tile.xBuffer.slice(0, numItems));
+            (ox.array as Float32Array).set(tile.xBuffer.subarray(0, numItems));
             ox.needsUpdate = true;
 
             const oy = geo.getAttribute('offsetY') as THREE.InstancedBufferAttribute;
-            (oy.array as Float32Array).set(tile.yBuffer!.slice(0, numItems));
+            (oy.array as Float32Array).set(tile.yBuffer!.subarray(0, numItems));
             oy.needsUpdate = true;
 
             const ixBuf = tile.ixBuffer || new Float32Array(numItems);
             const ix = geo.getAttribute('pointIx') as THREE.InstancedBufferAttribute;
-            (ix.array as Float32Array).set(ixBuf.slice(0, numItems));
+            (ix.array as Float32Array).set(ixBuf.subarray(0, numItems));
             ix.needsUpdate = true;
         }
         
@@ -354,11 +364,11 @@ export class Scatterplot {
             const spawnTimeArray = new Float32Array(numItems).fill(currentTime);
 
             const ic = geo.getAttribute('instanceColor') as THREE.InstancedBufferAttribute;
-            (ic.array as Float32Array).set(tile.colorBuffer.slice(0, numItems));
+            (ic.array as Float32Array).set(tile.colorBuffer.subarray(0, numItems));
             ic.needsUpdate = true;
 
             const is = geo.getAttribute('instanceSize') as THREE.InstancedBufferAttribute;
-            (is.array as Float32Array).set(tile.sizeBuffer!.slice(0, numItems));
+            (is.array as Float32Array).set(tile.sizeBuffer!.subarray(0, numItems));
             is.needsUpdate = true;
 
             const st = geo.getAttribute('spawnTime') as THREE.InstancedBufferAttribute;
@@ -368,7 +378,7 @@ export class Scatterplot {
         
         if (tile.hoverBuffer) {
             const offset = slot * this.rowsPerTile;
-            this.globalHoverBuffer.set(tile.hoverBuffer.slice(0, numItems), offset * 3);
+            this.globalHoverBuffer.set(tile.hoverBuffer.subarray(0, numItems), offset * 3);
         }
 
         tile.needsUpdate = false;
@@ -376,6 +386,8 @@ export class Scatterplot {
       
       this.slotMeshes[slot].visible = geo.instanceCount > 0;
     }
+    
+    return hasPendingUpdates;
   }
 
   public updateHover(globalId: number, tooltipHtmlCallback: (html: string) => void) {

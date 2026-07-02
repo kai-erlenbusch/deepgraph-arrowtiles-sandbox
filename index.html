@@ -5,13 +5,20 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>deepgraph-arrowtiles-sandbox</title>
+    <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
+
     <div id="app"></div>
     <div id="ui" style="position: absolute; bottom: 20px; left: 20px; background: rgba(0,0,0,0.8); color: white; padding: 15px; border-radius: 8px; font-family: sans-serif; z-index: 1000; pointer-events: none;">
-      <h2 style="margin: 0 0 10px 0; font-size: 16px;">WebGPU + Arrow IPC Zero-Copy Tiling</h2>
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; pointer-events: auto;">
+        <h2 style="margin: 0; font-size: 16px; pointer-events: none;">WebGPU + Arrow IPC Zero-Copy Tiling</h2>
+        <button id="copy-metrics-btn" style="background: none; border: none; cursor: pointer; color: #aaa; padding: 0; display: flex; align-items: center;" title="Copy Metrics">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+        </button>
+      </div>
       <p style="margin: 0 0 10px 0; font-family: monospace;"></p>
-      <button id="swap-mode-btn" style="pointer-events: auto; padding: 5px 10px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer;">Mode: 2D</button>
+
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

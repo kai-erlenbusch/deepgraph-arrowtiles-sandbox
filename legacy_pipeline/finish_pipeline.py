@@ -7,7 +7,7 @@ import time
 import os
 import pmtiles.writer
 import numpy as np
-import pandas as pd
+from assignment_utils import fast_assignment
 
 print("Streaming batches via PyArrow VECTORIZED and assigning Zoom Levels dynamically...")
 
@@ -17,7 +17,7 @@ global_ix = 1
 max_zoom = 14
 max_capacity = 50000
 
-parquet_file = pq.ParquetFile('D:/exploratory/duckdb-extension/deepgraph-arrowtiles-sandbox/duckdb_temp/sorted_base.parquet')
+parquet_file = pq.ParquetFile('./duckdb_temp/sorted_base.parquet')
 
 assigned_schema = pa.schema([
     ('x_norm', pa.float32()),
@@ -28,7 +28,7 @@ assigned_schema = pa.schema([
     ('z', pa.uint8()),
     ('final_tile_id', pa.uint64())
 ])
-writer_assigned = pq.ParquetWriter('D:/exploratory/duckdb-extension/deepgraph-arrowtiles-sandbox/duckdb_temp/assigned_points_vec.parquet', assigned_schema)
+writer_assigned = pq.ParquetWriter('./duckdb_temp/assigned_points_vec.parquet', assigned_schema)
 
 start_time = time.time()
 for batch in parquet_file.iter_batches(batch_size=100000):
@@ -57,24 +57,16 @@ for batch in parquet_file.iter_batches(batch_size=100000):
         tids_z = t_cols[z][unassigned_mask]
         
         unique_tids = np.unique(tids_z)
-        base_caps_dict = {tid: capacities[(z, tid)] for tid in unique_tids}
-        base_caps = pd.Series(tids_z).map(base_caps_dict).values
+        unique_caps = np.array([capacities[(z, tid)] for tid in unique_tids], dtype=np.int64)
         
-        cumcounts = pd.Series(tids_z).groupby(tids_z).cumcount().values
+        accepted, updated_caps = fast_assignment(tids_z, unique_tids, unique_caps, max_capacity)
         
-        total_counts = base_caps + cumcounts
-        accepted = total_counts < max_capacity
+        for i in range(len(unique_tids)):
+            capacities[(z, unique_tids[i])] = updated_caps[i]
         
         accepted_indices = current_indices[accepted]
         out_z[accepted_indices] = z
         out_tid[accepted_indices] = tids_z[accepted]
-        
-        accepted_tids = tids_z[accepted]
-        if len(accepted_tids) > 0:
-            unique_acc, counts_acc = np.unique(accepted_tids, return_counts=True)
-            for tid, c in zip(unique_acc, counts_acc):
-                capacities[(z, tid)] += c
-                
         unassigned_mask[accepted_indices] = False
         
     out_i = np.arange(global_ix, global_ix + batch_size, dtype=np.float32)
@@ -100,9 +92,9 @@ writer_assigned.close()
 
 print(f"Points assigned! Sorting {total_processed} points by tile_id for PMTiles export...")
 con = duckdb.connect(config={'allow_unsigned_extensions': 'true', 'temp_directory': 'duckdb_temp', 'max_memory': '40GB'})
-con.execute("COPY (SELECT * FROM read_parquet('D:/exploratory/duckdb-extension/deepgraph-arrowtiles-sandbox/duckdb_temp/assigned_points_vec.parquet') ORDER BY final_tile_id) TO 'D:/exploratory/duckdb-extension/deepgraph-arrowtiles-sandbox/duckdb_temp/final_ordered.parquet' (FORMAT PARQUET)")
+con.execute("COPY (SELECT * FROM read_parquet('./duckdb_temp/assigned_points_vec.parquet') ORDER BY final_tile_id) TO './duckdb_temp/final_ordered.parquet' (FORMAT PARQUET)")
 
-final_pq = pq.ParquetFile('D:/exploratory/duckdb-extension/deepgraph-arrowtiles-sandbox/duckdb_temp/final_ordered.parquet')
+final_pq = pq.ParquetFile('./duckdb_temp/final_ordered.parquet')
 schema = final_pq.schema_arrow
 
 print(f"Opening PMTiles writer at gaia.pmtiles...")

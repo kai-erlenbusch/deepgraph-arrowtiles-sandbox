@@ -5,6 +5,13 @@ export default defineConfig({
   server: {
     port: 5173,
     host: true,
-    strictPort: true
-  }
+    strictPort: true,
+    fs: {
+      strict: true,
+      allow: ['.']
+    },
+    watch: {
+      ignored: ['.gemini/**', '.system_generated/**', '**/.gemini/**', '**/.system_generated/**']
+    }
+  },
 });

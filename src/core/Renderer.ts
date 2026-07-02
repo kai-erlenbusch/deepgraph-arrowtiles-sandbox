@@ -31,7 +31,7 @@ export class Renderer {
     }
 
     this.renderer = new WebGPURenderer({ 
-      antialias: true,
+      antialias: false, // Disabled for extreme fill-rate performance on additive points
       requiredLimits
     });
     this.renderer.setSize(window.innerWidth, window.innerHeight);

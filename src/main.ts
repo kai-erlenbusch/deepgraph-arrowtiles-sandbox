@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+
 import { MeshBasicNodeMaterial } from 'three/webgpu';
 import { 
   attribute, float, positionLocal, vec3, vec4, vec2, uv, distance, smoothstep,
@@ -9,31 +10,15 @@ import { Renderer } from './core/Renderer';
 import { PMTilesClient } from './PMTilesClient';
 import type { BoundingBox, TileData } from './PMTilesClient';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import Stats from 'three/examples/jsm/libs/stats.module.js';
-const TILE_SERVER_URL = 'http://localhost:8080/gaia.pmtiles';
+const TILE_SERVER_URL = '/gaia.pmtiles';
 
 
 
-let is2DMode = true; // 2D by default
+
 import { Scatterplot } from './Scatterplot';
 let rendererInstance: Renderer | null = null;
 let scatterplotInstance: Scatterplot | null = null;
 
-function setupModeSwap() {
-  const btn = document.getElementById('swap-mode-btn');
-  if (btn) {
-    btn.addEventListener('click', () => {
-      is2DMode = !is2DMode;
-      if (scatterplotInstance) {
-        scatterplotInstance.layerSpacingUniform.value = is2DMode ? 0.0 : 1.0;
-      }
-      if (rendererInstance) {
-        rendererInstance.set2DMode(is2DMode);
-      }
-      btn.innerText = `Mode: ${is2DMode ? '2D' : '2.5D'}`;
-    });
-  }
-}
 
 
 
@@ -41,7 +26,7 @@ async function init() {
   const container = document.getElementById('app')!;
   const uiText = document.querySelector('#ui p')!;
 
-  setupModeSwap();
+
 
   if (!navigator.gpu) {
     uiText.textContent = 'WebGPU is not supported by your browser.';
@@ -51,24 +36,39 @@ async function init() {
   const limits = adapter ? adapter.limits : undefined;
   const rendererWrapper = new Renderer(container, limits);
   await rendererWrapper.init();
+  
+  const device = (rendererWrapper.renderer as any).backend?.device;
+  if (device) {
+      device.addEventListener('uncapturederror', (event: any) => {
+          uiText.innerHTML = `<span style="color:red;font-weight:bold;">❌ WebGPU VRAM Crash: ${event.error.message}</span>`;
+          console.error("WebGPU uncapturederror:", event.error);
+      });
+  }
 
-  const stats = new Stats();
-  stats.showPanel(0); // 0: fps, 1: ms, 2: mb, 3+: custom
-  // Position it in the top right so it doesn't overlap the UI
-  stats.dom.style.position = 'absolute';
-  stats.dom.style.top = '0px';
-  stats.dom.style.right = '0px';
-  stats.dom.style.left = 'auto'; // override default left
-  document.body.appendChild(stats.dom);
+
+  rendererWrapper.renderer.sortObjects = false; // Disable sorting for additive blending
 
   const rootBounds = { minX: -2.0, maxX: 2.0, minY: -1.0, maxY: 1.0 };
   
-  const tileManager = new PMTilesClient(TILE_SERVER_URL, rootBounds);
-  (window as any).tileManagerInstance = tileManager;
+  const scatterplot = new Scatterplot(rendererWrapper.scene, rendererWrapper, rootBounds);
+  
+  // 2. Initialize the PMTiles client and pass maxTiles for LRU Cache
+  const tileManager = new PMTilesClient(TILE_SERVER_URL, rootBounds, scatterplot.maxTiles);
+  window.tileManagerInstance = tileManager;
   
   uiText.innerHTML = `WebGPU is supported!<br/>Streaming Quadtree Tiles...`;
 
-  const scatterplot = new Scatterplot(rendererWrapper.scene, rendererWrapper, rootBounds);
+  const copyBtn = document.getElementById('copy-metrics-btn');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', () => {
+       navigator.clipboard.writeText(uiText.innerText);
+       const origColor = copyBtn.style.color;
+       copyBtn.style.color = '#4CAF50';
+       setTimeout(() => copyBtn.style.color = origColor, 1000);
+    });
+  }
+
+
   
   rendererInstance = rendererWrapper;
   scatterplotInstance = scatterplot;
@@ -172,40 +172,61 @@ async function init() {
       scatterplot.unloadTile(tileId);
   };
 
+  const lastCameraMatrix = new THREE.Matrix4();
+  let lastZoom = -1;
+  let activeVisibleTiles: TileData[] = [];
+
   rendererWrapper.renderer.setAnimationLoop(() => {
     try {
+
       const t0 = performance.now();
       
-      // 1. Get frustum bounds from camera
       const cam = rendererWrapper.camera as THREE.OrthographicCamera;
-      const frustumBox: BoundingBox = {
+      const currentZoom = Math.log2(Math.max(1.0, cam.zoom));
+      
+      let t1 = performance.now();
+      
+      // 1. Get frustum bounds from camera (Throttled for box math only)
+      if (!lastCameraMatrix.equals(cam.matrixWorld) || currentZoom !== lastZoom) {
+          lastCameraMatrix.copy(cam.matrixWorld);
+          lastZoom = currentZoom;
+      }
+          
+      const worldFrustum: BoundingBox = {
          minX: cam.position.x + cam.left / cam.zoom,
          maxX: cam.position.x + cam.right / cam.zoom,
          minY: cam.position.y + cam.bottom / cam.zoom,
          maxY: cam.position.y + cam.top / cam.zoom
       };
+            const frustumBox: BoundingBox = worldFrustum;
       
       const currentMaxIx = scatterplot.calculateMaxIx(cam);
+      const camHash = `${cam.position.x},${cam.position.y},${cam.zoom}`;
+      const w = window as any;
       
-      const currentZoom = Math.log2(Math.max(1.0, cam.zoom));
-      // Artificially fetch 2 zoom levels deeper to guarantee a densely populated visual field
-      // e.g. at zoom=1 (home), it will fetch z=0, z=1, and z=2 (1 + 4 + 16 = 21 tiles)
-      const z = Math.max(2, Math.min(14, Math.floor(currentZoom) + 2));
+      // Prevent network/VRAM explosion: Limit absolute max depth based on zoom.
+      // We tune overfetch so that we never load more than ~85 tiles concurrently.
+      let overfetch = 1;
+      if (currentZoom < 2.0) overfetch = 2; // at z=0..1, fetch up to z=2..3 (max 21-85 tiles)
+      else if (currentZoom < 3.0) overfetch = 1; // at z=2, fetch up to z=3 (frustum culled)
       
-      // 2. Fetch visible tiles with CPU Zero-Cost Culling
-      const visibleTiles = tileManager.getVisibleTiles(frustumBox, z);
+      const currentZ = Math.min(14, Math.floor(currentZoom) + overfetch);
       
-      const t1 = performance.now();
-      
-      // 3. Update scatterplot geometry and compute nodes
-      scatterplot.updateTiles(visibleTiles);
+      let hasPendingUpdates = w.hasPendingUpdates || false;
+      if (w.lastCamHash !== camHash || tileManager.cacheChanged || hasPendingUpdates) {
+          // 2. Fetch visible tiles only when camera moves or cache updates
+          activeVisibleTiles = tileManager.getVisibleTiles(frustumBox, currentZ);
+          t1 = performance.now();
+          
+          // 3. Update scatterplot geometry and compute nodes
+          w.hasPendingUpdates = scatterplot.updateTiles(activeVisibleTiles);
+          
+          w.lastCamHash = camHash;
+          tileManager.cacheChanged = false;
+      }
       
       const t2 = performance.now();
       
-      let totalPoints = 0;
-      for (const t of visibleTiles) totalPoints += t.numRows;
-      uiText.innerHTML = `Streaming Quadtree<br/>Tiles rendered: ${visibleTiles.length}<br/>Points: ${totalPoints}`;
-
       // 4. Update Camera
       scatterplot.updateCamera(rendererWrapper.camera);
 
@@ -215,10 +236,8 @@ async function init() {
       rendererWrapper.render();
       
       const t4 = performance.now();
-      stats.update();
       
       // TELEMETRY
-      const w = window as any;
       w.perfAccum = w.perfAccum || { frames: 0, getVisibleTiles: 0, updateTiles: 0, updateCam: 0, render: 0, totalFrame: 0, lastReport: performance.now() };
       w.perfAccum.frames++;
       w.perfAccum.getVisibleTiles += (t1 - t0);
@@ -227,20 +246,45 @@ async function init() {
       w.perfAccum.render += (t4 - t3);
       w.perfAccum.totalFrame += (t4 - t0);
       
-      if (t4 - w.perfAccum.lastReport >= 1000) {
+      if (t4 - w.perfAccum.lastReport >= 250) {
          const p = w.perfAccum;
-         const data = {
-            fps: p.frames,
-            tiles: visibleTiles.length,
+         w.lastPerfReport = {
+            fps: (p.frames * (1000 / (t4 - p.lastReport))).toFixed(0),
+            tiles: activeVisibleTiles.length,
             getVisibleTiles: (p.getVisibleTiles / p.frames).toFixed(1),
             updateTiles: (p.updateTiles / p.frames).toFixed(1),
             updateCam: (p.updateCam / p.frames).toFixed(1),
             render: (p.render / p.frames).toFixed(1),
             totalFrame: (p.totalFrame / p.frames).toFixed(1)
          };
-         // fetch('http://localhost:8081/log', { method: 'POST', body: JSON.stringify(data) }).catch(e => {});
          w.perfAccum = { frames: 0, getVisibleTiles: 0, updateTiles: 0, updateCam: 0, render: 0, totalFrame: 0, lastReport: t4 };
+         
+         // Throttled UI DOM Update
+         let totalPoints = 0;
+         for (const t of activeVisibleTiles) totalPoints += t.numRows;
+         const vramMB = (activeVisibleTiles.length * 2.4).toFixed(1);
+         let netLatency = "0.0";
+         let workerLatency = "0.0";
+         if (w.fetchTelemetry && w.fetchTelemetry.net.length > 0) {
+             const sumNet = w.fetchTelemetry.net.reduce((a: number, b: number) => a + b, 0);
+             const sumWorker = w.fetchTelemetry.worker.reduce((a: number, b: number) => a + b, 0);
+             netLatency = (sumNet / w.fetchTelemetry.net.length).toFixed(1);
+             workerLatency = (sumWorker / w.fetchTelemetry.worker.length).toFixed(1);
+         }
+         
+         const perf = w.lastPerfReport;
+         uiText.innerHTML = `
+           <b>Streaming Quadtree</b> (Z=${currentZ})<br/>
+           FPS: <b>${perf.fps}</b><br/>
+           Camera Zoom: <b>${currentZoom.toFixed(2)}</b><br/>
+           Tiles active: ${activeVisibleTiles.length} (${vramMB} MB VRAM)<br/>
+           Points rendered: ${(totalPoints / 1000000).toFixed(2)} Million<br/>
+           Tile load latency: <b>Net</b> ${netLatency}ms | <b>Worker</b> ${workerLatency}ms
+           <br/><span style="color:#aaa; font-size: 12px;">Culling: ${perf.getVisibleTiles}ms | GPU Upload: ${perf.updateTiles}ms | Render: ${perf.render}ms</span>
+         `;
       }
+      
+
     } catch (err) {
       console.error("Animation loop crash:", err);
       rendererWrapper.renderer.setAnimationLoop(null); // Stop loop to avoid 3000 errors

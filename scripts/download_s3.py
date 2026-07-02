@@ -50,7 +50,7 @@ def main():
             elapsed = time.time() - start_time
             size_mb = os.path.getsize(output_file) / (1024 * 1024)
             print(f"  -> Batch {i} completed in {elapsed:.1f}s. File size: {size_mb:.1f} MB")
-        except Exception as e:
+        except (duckdb.Error, OSError) as e:
             print(f"  -> Error in batch {i}: {e}")
             if os.path.exists(output_file):
                 os.remove(output_file)
@@ -61,7 +61,7 @@ def main():
                 elapsed = time.time() - start_time
                 size_mb = os.path.getsize(output_file) / (1024 * 1024)
                 print(f"  -> Batch {i} completed on retry in {elapsed:.1f}s. File size: {size_mb:.1f} MB")
-            except Exception as e2:
+            except (duckdb.Error, OSError) as e2:
                 print(f"  -> Retry failed: {e2}")
 
 if __name__ == '__main__':

@@ -4,8 +4,8 @@ import pmtiles.writer
 import numpy as np
 
 print(f"Opening PMTiles writer at gaia.pmtiles...")
-output_pmtiles = "D:/exploratory/duckdb-extension/deepgraph-arrowtiles-sandbox/gaia.pmtiles"
-final_pq = pq.ParquetFile('D:/exploratory/duckdb-extension/deepgraph-arrowtiles-sandbox/duckdb_temp/final_ordered_new.parquet')
+output_pmtiles = "./public/gaia.pmtiles"
+final_pq = pq.ParquetFile('./duckdb_temp/final_ordered_new.parquet')
 schema = final_pq.schema_arrow
 
 with open(output_pmtiles, "wb") as f:

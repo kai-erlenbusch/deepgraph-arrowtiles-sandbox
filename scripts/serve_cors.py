@@ -16,7 +16,9 @@ class CORSRequestHandler(http.server.SimpleHTTPRequestHandler):
 if __name__ == '__main__':
     port = 8080
     import functools
-    handler = functools.partial(CORSRequestHandler, directory='D:/exploratory/duckdb-extension')
+    import os
+    os.chdir('D:/exploratory/duckdb-extension/deepgraph-arrowtiles-sandbox/public')
+    handler = CORSRequestHandler
     with socketserver.TCPServer(("", port), handler) as httpd:
         print(f"Serving HTTP on port {port} with CORS enabled...")
         httpd.serve_forever()
