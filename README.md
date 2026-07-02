@@ -48,7 +48,7 @@ graph TD
         BUF --> R[WebGPU Renderer]
         R -->|Draws InstancedMesh| C[Canvas]
     end
-    subgraph Data Pipeline (DuckDB + Rust)
+    subgraph Backend ["Data Pipeline (DuckDB + Rust)"]
         RAW[(Raw Parquet)] -->|Global Magnitude Sort| DDB[DuckDB]
         DDB -->|Spatial Partitioning| CHUNKS[(Macro-Chunks)]
         CHUNKS -->|Parallel Voxel Bucketing| RUST[Rust arrowtiles_bucketer]
