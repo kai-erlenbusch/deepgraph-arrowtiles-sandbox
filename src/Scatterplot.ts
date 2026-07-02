@@ -146,7 +146,12 @@ export class Scatterplot {
     // relatively close in brightness, but flatten out so we don't wash out at high zooms.
     const opacityRamp = sqrt(zoomT); 
     const baseOpacity = mix(float(0.03), float(0.10), opacityRamp);
-    const dynamicOpacity = clamp(baseOpacity, float(1.0 / 255.0), float(1.0));
+    
+    // Smoothly fade in stars over 1.0 magnitude unit as they drop below the maxMagUniform threshold
+    const magFade = clamp(this.maxMagUniform.sub(safeRawMag), float(0.0), float(1.0));
+    const finalBaseOpacity = select(isTokens, baseOpacity, baseOpacity.mul(magFade));
+    
+    const dynamicOpacity = clamp(finalBaseOpacity, float(1.0 / 255.0), float(1.0));
 
     const val = safeRawColor;
 
@@ -280,12 +285,12 @@ export class Scatterplot {
     const currentZoom = Math.log2(Math.max(1.0, camera.zoom));
     
     // Map zoom level to a global magnitude cutoff!
-    // Zoom 0 (fully out): Show up to magnitude 14 (plenty of stars, fast rendering)
-    // Zoom 6 (fully in): Show up to magnitude 21 (all stars visible)
+    // Zoom 0 (fully out): Show up to magnitude 11 (matches Z=1 capacity)
+    // Zoom 5 (fully in): Show up to magnitude 21 (all stars visible)
     if (!this.maxMagUniform) {
         console.error("maxMagUniform is undefined!");
     } else {
-        const minMag = 14.0;
+        const minMag = 11.0;
         const maxMag = 21.0;
         const zoomRatio = Math.max(0.0, Math.min(1.0, currentZoom / 5.0));
         this.maxMagUniform.value = minMag + (maxMag - minMag) * zoomRatio;
