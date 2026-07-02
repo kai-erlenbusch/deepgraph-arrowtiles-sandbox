@@ -56,32 +56,25 @@ def generate_pmtiles(input_parquet: str, output_pmtiles: str, temp_dir: str, max
                         RADIANS(dec) AS dec_rad,
                         RADIANS(192.85948) AS a_g,
                         RADIANS(27.12825) AS d_g,
-                        RADIANS(32.93192) AS l_n
+                        RADIANS(122.93192) AS l_ncp
                     FROM read_parquet('{input_parquet}')
                 ),
                 galactic AS (
                     SELECT 
                         magnitude, bv,
                         ASIN(SIN(d_g)*SIN(dec_rad) + COS(d_g)*COS(dec_rad)*COS(ra_rad - a_g)) AS b_rad,
-                        ATAN2(COS(dec_rad)*SIN(ra_rad - a_g), COS(d_g)*SIN(dec_rad) - SIN(d_g)*COS(dec_rad)*COS(ra_rad - a_g)) AS l_rad_raw,
-                        l_n
+                        l_ncp - ATAN2(
+                            COS(dec_rad)*SIN(ra_rad - a_g), 
+                            SIN(d_g)*COS(dec_rad)*COS(ra_rad - a_g) - COS(d_g)*SIN(dec_rad)
+                        ) AS l_rad_raw
                     FROM raw_data
-                ),
-                normalized AS (
-                    SELECT
-                        magnitude, bv, b_rad,
-                        (l_rad_raw + l_n) % (2 * PI()) AS l_rad_mod
-                    FROM galactic
                 ),
                 wrapped AS (
                     SELECT
                         magnitude, bv, b_rad,
-                        CASE 
-                            WHEN l_rad_mod > PI() THEN l_rad_mod - 2*PI() 
-                            WHEN l_rad_mod < -PI() THEN l_rad_mod + 2*PI() 
-                            ELSE l_rad_mod 
-                        END AS l_rad
-                    FROM normalized
+                        -- Robustly wrap to [-PI, PI]
+                        ((l_rad_raw + 5*PI()) % (2*PI())) - PI() AS l_rad
+                    FROM galactic
                 ),
                 gaia_sampled AS (
                     SELECT 

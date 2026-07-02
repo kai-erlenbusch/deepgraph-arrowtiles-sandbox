@@ -26,8 +26,7 @@ export interface BoundingBox {
 
 export interface TileData {
     key: string; // "z/x/y"
-    xBuffer: Float64Array;
-    yBuffer: Float64Array;
+    xyBuffer: Uint16Array;
     colorBuffer: Float32Array;  // bp_rp
     hoverBuffer?: Int32Array;
     sizeBuffer: Float32Array;   // abs_m
@@ -67,9 +66,8 @@ export class PMTilesClient {
                 } else {
                     const tileData: TileData = {
                         key: data.key,
-                        xBuffer: data.xBuffer,
-                        yBuffer: data.yBuffer,
-                        colorBuffer: data.colorBuffer,
+                        xyBuffer: data.xyBuffer ? new Float32Array(data.xyBuffer) : null as any,
+                        colorBuffer: data.colorBuffer ? new Float32Array(data.colorBuffer) : null as any,
                         sizeBuffer: data.sizeBuffer,
                         ixBuffer: data.ixBuffer,
                         numRows: data.numRows
@@ -217,8 +215,7 @@ export class PMTilesClient {
 
         try {
             const t0 = performance.now();
-            const invertedY = (1 << z) - 1 - y;
-            const tile = await this.pmtiles.getZxy(z, x, invertedY);
+            const tile = await this.pmtiles.getZxy(z, x, y);
             const tNetEnd = performance.now();
             if (tile) {
                 const tileData = await this.parseArrowInWorker(key, new Uint8Array(tile.data), t0, tNetEnd);

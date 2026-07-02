@@ -105,6 +105,7 @@ To prevent extreme additive blowouts and preserve 60 FPS when looking at the den
 1. **PMTiles Archive vs. Feather S3:** We moved away from thousands of individual `.feather` files. By packing the Apache Arrow chunks into a single `.pmtiles` file using DuckDB, we leverage HTTP Range Requests. This reduces network overhead, avoids S3 file-count limits, and massively simplifies deployment.
 2. **Rust-Powered Pipeline:** The voxel bucketing step (Stage 2) was rewritten from Python into a parallelized Rust tool (`arrowtiles_bucketer`), solving memory constraints and accelerating processing times for the 24.5 GB raw dataset.
 3. **Sub-Pixel Additive Tuning:** Base opacities have been dropped as low as `0.005` to simulate Deepscatter's extremely faint rendering logic, producing smooth, photorealistic Milky Way structure.
+4. **Corrected Galactic Projection & Orientation:** Implemented accurate Equatorial-to-Galactic coordinate transformations in the data pipeline to prevent the dense Milky Way core from being distorted or smeared across spatial chunk boundaries. Additionally, applied WebGPU inverted-Y rendering fixes to ensure the final visual projection matches standard astronomical orientations.
 
 ---
 

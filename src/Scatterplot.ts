@@ -78,8 +78,7 @@ export class Scatterplot {
         geo.attributes.uv = this.quadGeometry.attributes.uv;
         
         // Use standard WebGPU Instanced Attributes
-        geo.setAttribute('offsetX', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile), 1));
-        geo.setAttribute('offsetY', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile), 1));
+        geo.setAttribute('offsetXY', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile * 2), 2));
         geo.setAttribute('pointIx', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile), 1));
         geo.setAttribute('instanceColor', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile), 1));
         geo.setAttribute('instanceSize', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile), 1));
@@ -92,6 +91,9 @@ export class Scatterplot {
         mesh.visible = false;
         mesh.userData.pickingMaterial = pickingMaterial;
         mesh.userData.slotIndex = i; // Assign Slot ID natively for picking shader
+        mesh.userData.tileOffsetX = 0.0;
+        mesh.userData.tileOffsetY = 0.0;
+        mesh.userData.tileScale = 1.0;
 
         this.slotMeshes.push(mesh);
         this.scene.add(mesh);
@@ -102,8 +104,7 @@ export class Scatterplot {
     // Abstracted TSL inputs allow ALL 800 meshes to perfectly share this 1 Pipeline!
     const rawColor = float(attribute('instanceColor', 'float'));
     const rawMag = float(attribute('instanceSize', 'float'));
-    const offsetX = float(attribute('offsetX', 'float'));
-    const offsetY = float(attribute('offsetY', 'float'));
+    const offsetXY = attribute('offsetXY', 'vec2');
     const pointIx = float(attribute('pointIx', 'float'));
     const spawnTime = float(attribute('spawnTime', 'float'));
 
@@ -187,8 +188,16 @@ export class Scatterplot {
     mat.colorNode = baseColor.mul(safeAlpha);
     mat.opacityNode = safeAlpha;
     
-    const mappedX = offsetX.mul(float(4.0)).sub(float(2.0));
-    const mappedY = offsetY.mul(float(2.0)).sub(float(1.0));
+    const tileOffsetX = userData('tileOffsetX', 'float');
+    const tileOffsetY = userData('tileOffsetY', 'float');
+    const tileScale = userData('tileScale', 'float');
+    
+    // Reconstruct global [0..1] coordinates
+    const globalX = tileOffsetX.add(offsetXY.x.mul(tileScale));
+    const globalY = tileOffsetY.add(offsetXY.y.mul(tileScale));
+    
+    const mappedX = globalX.mul(float(4.0)).sub(float(2.0));
+    const mappedY = float(1.0).sub(globalY.mul(float(2.0)));
     const offset3D = vec3(mappedX, mappedY, float(0.0));
     mat.positionNode = select(isVisible, offset3D.add(positionLocal.mul(safeSize)), vec3(1000000.0));
 
@@ -197,8 +206,7 @@ export class Scatterplot {
 
   private createPickingMaterial() {
     const rawMag = float(float(attribute('instanceSize', 'float')));
-    const offsetX = float(float(attribute('offsetX', 'float')));
-    const offsetY = float(float(attribute('offsetY', 'float')));
+    const offsetXY = attribute('offsetXY', 'vec2');
     const pointIx = float(float(attribute('pointIx', 'float')));
 
     const mat = new MeshBasicNodeMaterial({
@@ -237,8 +245,16 @@ export class Scatterplot {
     const instanceSize = mix(float(0.6), float(2.5), zoomT).mul(rawMag);
     const safeSize = targetPixels.mul(this.rendererWrapper.worldUnitsPerPixelUniform).mul(instanceSize);
 
-    const mappedX = offsetX.mul(float(4.0)).sub(float(2.0));
-    const mappedY = offsetY.mul(float(2.0)).sub(float(1.0));
+    const tileOffsetX = userData('tileOffsetX', 'float');
+    const tileOffsetY = userData('tileOffsetY', 'float');
+    const tileScale = userData('tileScale', 'float');
+    
+    // Reconstruct global [0..1] coordinates
+    const globalX = tileOffsetX.add(offsetXY.x.mul(tileScale));
+    const globalY = tileOffsetY.add(offsetXY.y.mul(tileScale));
+
+    const mappedX = globalX.mul(float(4.0)).sub(float(2.0));
+    const mappedY = float(1.0).sub(globalY.mul(float(2.0)));
     const offset3D = vec3(mappedX, mappedY, float(0.0));
     mat.positionNode = select(isVisible, offset3D.add(positionLocal.mul(safeSize)), vec3(1000000.0));
 
@@ -341,21 +357,28 @@ export class Scatterplot {
         }
         processedTiles++;
         
+        // Update per-mesh uniforms for the shader
+        const [zStr, txStr, tyStr] = tile.key.split('/');
+        const scale = 1.0 / Math.pow(2, parseInt(zStr));
+        this.slotMeshes[slot].userData.tileOffsetX = parseInt(txStr) * scale;
+        this.slotMeshes[slot].userData.tileOffsetY = parseInt(tyStr) * scale;
+        this.slotMeshes[slot].userData.tileScale = scale;
+        
         const numItems = Math.min(tile.numRows, this.rowsPerTile);
         geo.instanceCount = numItems;
         
-        if (tile.xBuffer) {
-            const ox = geo.getAttribute('offsetX') as THREE.InstancedBufferAttribute;
-            (ox.array as Float32Array).set(tile.xBuffer.subarray(0, numItems));
-            ox.needsUpdate = true;
-
-            const oy = geo.getAttribute('offsetY') as THREE.InstancedBufferAttribute;
-            (oy.array as Float32Array).set(tile.yBuffer!.subarray(0, numItems));
-            oy.needsUpdate = true;
+        if (tile.xyBuffer) {
+            const oxy = geo.getAttribute('offsetXY') as THREE.InstancedBufferAttribute;
+            (oxy.array as Float32Array).set(tile.xyBuffer.subarray(0, numItems * 2));
+            oxy.clearUpdateRanges();
+            oxy.addUpdateRange(0, numItems * 2);
+            oxy.needsUpdate = true;
 
             const ixBuf = tile.ixBuffer || new Float32Array(numItems);
             const ix = geo.getAttribute('pointIx') as THREE.InstancedBufferAttribute;
             (ix.array as Float32Array).set(ixBuf.subarray(0, numItems));
+            ix.clearUpdateRanges();
+            ix.addUpdateRange(0, numItems);
             ix.needsUpdate = true;
         }
         
@@ -365,14 +388,20 @@ export class Scatterplot {
 
             const ic = geo.getAttribute('instanceColor') as THREE.InstancedBufferAttribute;
             (ic.array as Float32Array).set(tile.colorBuffer.subarray(0, numItems));
+            ic.clearUpdateRanges();
+            ic.addUpdateRange(0, numItems);
             ic.needsUpdate = true;
 
             const is = geo.getAttribute('instanceSize') as THREE.InstancedBufferAttribute;
             (is.array as Float32Array).set(tile.sizeBuffer!.subarray(0, numItems));
+            is.clearUpdateRanges();
+            is.addUpdateRange(0, numItems);
             is.needsUpdate = true;
 
             const st = geo.getAttribute('spawnTime') as THREE.InstancedBufferAttribute;
             (st.array as Float32Array).set(spawnTimeArray);
+            st.clearUpdateRanges();
+            st.addUpdateRange(0, numItems);
             st.needsUpdate = true;
         }
         
@@ -406,20 +435,27 @@ export class Scatterplot {
       }
   
       const tile = this.slotToTileData[slotIndex];
-      if (!tile || !tile.xBuffer || !tile.yBuffer || !tile.sizeBuffer) {
+      if (!tile || !tile.xyBuffer || !tile.sizeBuffer) {
           this.hoverMesh.visible = false;
           return;
       }
 
-      const offsetX = new Float32Array(tile.xBuffer);
-      const offsetY = new Float32Array(tile.yBuffer);
+      const offsetXY = new Uint16Array(tile.xyBuffer);
       const sizeBuffer = new Float32Array(tile.sizeBuffer);
       
-      const rawX = offsetX[rowIndex];
-      const rawY = offsetY[rowIndex];
+      const rawX = offsetXY[rowIndex * 2] / 65535.0;
+      const rawY = offsetXY[rowIndex * 2 + 1] / 65535.0;
       
-      const mappedX = rawX * 4.0 - 2.0;
-      const mappedY = rawY * 2.0 - 1.0;
+      const [zStr, txStr, tyStr] = tileKey.split('/');
+      const scale = 1.0 / Math.pow(2, parseInt(zStr));
+      const tileOriginX = parseInt(txStr) * scale;
+      const tileOriginY = parseInt(tyStr) * scale;
+      
+      const globalX = tileOriginX + (rawX * scale);
+      const globalY = tileOriginY + (rawY * scale);
+      
+      const mappedX = globalX * 4.0 - 2.0;
+      const mappedY = 1.0 - globalY * 2.0;
       
       this.hoverMesh.position.set(mappedX, mappedY, 0.0);
       
