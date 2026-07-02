@@ -66,7 +66,7 @@ export class PMTilesClient {
                 } else {
                     const tileData: TileData = {
                         key: data.key,
-                        xyBuffer: data.xyBuffer ? new Float32Array(data.xyBuffer) : null as any,
+                        xyBuffer: data.xyBuffer ? new Uint16Array(data.xyBuffer) : null as any,
                         colorBuffer: data.colorBuffer ? new Float32Array(data.colorBuffer) : null as any,
                         sizeBuffer: data.sizeBuffer,
                         ixBuffer: data.ixBuffer,

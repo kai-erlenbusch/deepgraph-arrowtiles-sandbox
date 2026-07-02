@@ -78,7 +78,7 @@ export class Scatterplot {
         geo.attributes.uv = this.quadGeometry.attributes.uv;
         
         // Use standard WebGPU Instanced Attributes
-        geo.setAttribute('offsetXY', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile * 2), 2));
+        geo.setAttribute('offsetXY', new THREE.InstancedBufferAttribute(new Uint16Array(this.rowsPerTile * 2), 2, true));
         geo.setAttribute('pointIx', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile), 1));
         geo.setAttribute('instanceColor', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile), 1));
         geo.setAttribute('instanceSize', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile), 1));
@@ -369,7 +369,7 @@ export class Scatterplot {
         
         if (tile.xyBuffer) {
             const oxy = geo.getAttribute('offsetXY') as THREE.InstancedBufferAttribute;
-            (oxy.array as Float32Array).set(tile.xyBuffer.subarray(0, numItems * 2));
+            (oxy.array as Uint16Array).set(tile.xyBuffer.subarray(0, numItems * 2));
             oxy.clearUpdateRanges();
             oxy.addUpdateRange(0, numItems * 2);
             oxy.needsUpdate = true;

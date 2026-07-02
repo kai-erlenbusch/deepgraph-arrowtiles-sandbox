@@ -30,10 +30,10 @@ self.onmessage = (e) => {
             // Explicitly copy data into new arrays to avoid transferring
             // the shared Arrow IPC ArrayBuffer, which would detach it from the worker
             // and break any subsequent accesses to other columns sharing the same block.
-            const xyFloat = new Float32Array(numRows * 2);
+            const xyU16Buffer = new Uint16Array(numRows * 2);
             for (let i = 0; i < numRows; i++) {
-                xyFloat[i * 2] = xU16[i] / 65535.0;
-                xyFloat[i * 2 + 1] = yU16[i] / 65535.0;
+                xyU16Buffer[i * 2] = xU16[i];
+                xyU16Buffer[i * 2 + 1] = yU16[i];
             }
             
             const newColor = new Float32Array(color);
@@ -41,7 +41,7 @@ self.onmessage = (e) => {
             const newIx = new Float32Array(ix);
 
             const transferables = [
-                xyFloat.buffer, 
+                xyU16Buffer.buffer, 
                 newColor.buffer, 
                 newSize.buffer,
                 newIx.buffer
@@ -49,7 +49,7 @@ self.onmessage = (e) => {
             
             self.postMessage({
                 key,
-                xyBuffer: xyFloat,
+                xyBuffer: xyU16Buffer,
                 colorBuffer: newColor,
                 sizeBuffer: newSize,
                 ixBuffer: newIx,
