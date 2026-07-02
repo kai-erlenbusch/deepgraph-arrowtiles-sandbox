@@ -142,10 +142,10 @@ export class Scatterplot {
     const isVisible = rawMag.greaterThan(0.0)
                       .and(pointIx.lessThanEqual(this.maxIxUniform));
     const safeSize = select(isVisible, targetPixels.mul(this.rendererWrapper.worldUnitsPerPixelUniform).mul(instanceSize), float(0.0));
-    // Use a quadratic curve (zoomT * zoomT) for opacity to keep it dimmer at low zooms (z=2, z=3)
-    // and ramp up exponentially as we zoom in (like Curve D in the reference image)
-    const opacityRamp = zoomT.mul(zoomT); 
-    const baseOpacity = mix(float(0.03), float(0.15), opacityRamp);
+    // Use a square-root curve (Curve C) so that opacity jumps up quickly to keep Z=2 and Z=3 
+    // relatively close in brightness, but flatten out so we don't wash out at high zooms.
+    const opacityRamp = sqrt(zoomT); 
+    const baseOpacity = mix(float(0.03), float(0.10), opacityRamp);
     const dynamicOpacity = clamp(baseOpacity, float(1.0 / 255.0), float(1.0));
 
     const val = safeRawColor;
