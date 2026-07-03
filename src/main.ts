@@ -207,8 +207,14 @@ async function init() {
       // Prevent network/VRAM explosion: Limit absolute max depth based on zoom.
       // We tune overfetch so that we never load more than ~85 tiles concurrently.
       let overfetch = 1;
-      if (currentZoom < 2.0) overfetch = 2; // at z=0..1, fetch up to z=2..3 (max 21-85 tiles)
-      else if (currentZoom < 3.0) overfetch = 1; // at z=2, fetch up to z=3 (frustum culled)
+      const latency = w.lastNetLatency || 0;
+      if (latency > 200) {
+          overfetch = 0; // Throttle fetching on slow networks
+      } else if (currentZoom < 2.0) {
+          overfetch = 2; // at z=0..1, fetch up to z=2..3 (max 21-85 tiles)
+      } else if (currentZoom < 3.0) {
+          overfetch = 1; // at z=2, fetch up to z=3 (frustum culled)
+      }
       
       const currentZ = Math.min(14, Math.floor(currentZoom) + overfetch);
       
@@ -268,7 +274,9 @@ async function init() {
          if (w.fetchTelemetry && w.fetchTelemetry.net.length > 0) {
              const sumNet = w.fetchTelemetry.net.reduce((a: number, b: number) => a + b, 0);
              const sumWorker = w.fetchTelemetry.worker.reduce((a: number, b: number) => a + b, 0);
-             netLatency = (sumNet / w.fetchTelemetry.net.length).toFixed(1);
+             const avgNet = sumNet / w.fetchTelemetry.net.length;
+             w.lastNetLatency = avgNet;
+             netLatency = avgNet.toFixed(1);
              workerLatency = (sumWorker / w.fetchTelemetry.worker.length).toFixed(1);
          }
          

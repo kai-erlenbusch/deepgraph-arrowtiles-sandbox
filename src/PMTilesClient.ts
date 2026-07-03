@@ -49,6 +49,7 @@ export class PMTilesClient {
     private schemaBytes: Uint8Array | null = null;
     private queue = new PQueue({ concurrency: 6 });
     private worker = new ArrowWorker();
+    private abortControllers = new Map<string, AbortController>();
     private resolvers = new Map<string, {resolve: Function, reject: Function, t0: number, tNetEnd: number}>();
 
     constructor(url: string, rootBounds: BoundingBox, maxCacheSize: number = 400) {
@@ -162,6 +163,15 @@ export class PMTilesClient {
             }
         }
 
+        // Abort any tiles that are currently loading but are no longer visible
+        for (const key of this.loadingTiles) {
+            if (!this.currentlyVisibleIds.has(key)) {
+                this.abortControllers.get(key)?.abort();
+                this.abortControllers.delete(key);
+                this.loadingTiles.delete(key);
+            }
+        }
+
         // Evict LRU off-screen tiles if we exceed max capacity (Zero-allocation O(N) eviction)
         let totalTiles = this.activeTiles.size + this.loadingTiles.size;
         while (totalTiles > this.maxCacheSize) {
@@ -210,12 +220,16 @@ export class PMTilesClient {
         // If it's no longer visible AND we are over capacity, drop the network request
         if (!this.currentlyVisibleIds.has(key) && (this.activeTiles.size + this.loadingTiles.size) >= this.maxCacheSize) {
             this.loadingTiles.delete(key);
+            this.abortControllers.delete(key);
             return;
         }
 
+        const abortController = new AbortController();
+        this.abortControllers.set(key, abortController);
+
         try {
             const t0 = performance.now();
-            const tile = await this.pmtiles.getZxy(z, x, y);
+            const tile = await this.pmtiles.getZxy(z, x, y, abortController.signal);
             const tNetEnd = performance.now();
             if (tile) {
                 const tileData = await this.parseArrowInWorker(key, new Uint8Array(tile.data), t0, tNetEnd);
@@ -223,10 +237,14 @@ export class PMTilesClient {
                 this.cacheChanged = true;
                 if (this.onTileLoaded) this.onTileLoaded(tileData);
             }
-        } catch (e) {
+        } catch (e: any) {
+            if (e.name === 'AbortError') {
+                return; // Silently ignore aborted requests
+            }
             console.error(`Failed to load tile ${key}`, e);
         } finally {
             this.loadingTiles.delete(key);
+            this.abortControllers.delete(key);
         }
     }
 }
