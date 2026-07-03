@@ -1,5 +1,13 @@
 import * as THREE from 'three';
 
+// Globally swallow AbortErrors that leak from pmtiles due to internal unhandled promise chaining
+window.addEventListener('unhandledrejection', (event) => {
+    if (event.reason && event.reason.name === 'AbortError') {
+        event.preventDefault();
+    }
+});
+
+let _cameraHash = "";
 import { MeshBasicNodeMaterial } from 'three/webgpu';
 import { 
   attribute, float, positionLocal, vec3, vec4, vec2, uv, distance, smoothstep,

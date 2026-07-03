@@ -89,6 +89,23 @@ export class PMTilesClient {
         };
     }
 
+    private async ensureSchema() {
+        if (!this.schemaBytes) {
+            const metadata = await this.pmtiles.getMetadata();
+            if (metadata && metadata.arrow_schema) {
+                const binaryString = atob(metadata.arrow_schema);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                    bytes[i] = binaryString.charCodeAt(i);
+                }
+                this.schemaBytes = bytes;
+            } else {
+                // If the metadata doesn't have an arrow_schema, assume it's already embedded in the payload
+                this.schemaBytes = new Uint8Array(0);
+            }
+        }
+    }
+
     // Convert PMTiles tile ID back to Web Mercator-like bounds to check visibility
     private tileBounds(z: number, x: number, y: number): BoundingBox {
         // Our hilbert_normalized used 0.0 to 1.0 logic, mapped over a 4^z grid.
@@ -157,7 +174,7 @@ export class PMTilesClient {
                         const centerY = (startY + endY) / 2.0;
                         const dist = Math.sqrt(Math.pow(x - centerX, 2) + Math.pow(y - centerY, 2));
                         const priority = 1000 - (cz * 100) - dist; // Lower Z and closer to center loads first
-                        this.queue.add(() => this.loadTile(cz, x, y, key), { priority });
+                        this.queue.add(() => this.loadTile(cz, x, y, key), { priority }).catch(() => {});
                     }
                 }
             }
@@ -232,7 +249,16 @@ export class PMTilesClient {
             const tile = await this.pmtiles.getZxy(z, x, y, abortController.signal);
             const tNetEnd = performance.now();
             if (tile) {
-                const tileData = await this.parseArrowInWorker(key, new Uint8Array(tile.data), t0, tNetEnd);
+                await this.ensureSchema();
+                let payload = new Uint8Array(tile.data);
+                if (this.schemaBytes && this.schemaBytes.length > 0) {
+                    const combined = new Uint8Array(this.schemaBytes.length + payload.length);
+                    combined.set(this.schemaBytes);
+                    combined.set(payload, this.schemaBytes.length);
+                    payload = combined;
+                }
+                
+                const tileData = await this.parseArrowInWorker(key, payload, t0, tNetEnd);
                 this.activeTiles.set(key, tileData);
                 this.cacheChanged = true;
                 if (this.onTileLoaded) this.onTileLoaded(tileData);

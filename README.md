@@ -104,8 +104,9 @@ To prevent extreme additive blowouts and preserve 60 FPS when looking at the den
 
 1. **PMTiles Archive vs. Feather S3:** We moved away from thousands of individual `.feather` files. By packing the Apache Arrow chunks into a single `.pmtiles` file using DuckDB, we leverage HTTP Range Requests. This reduces network overhead, avoids S3 file-count limits, and massively simplifies deployment.
 2. **Rust-Powered Pipeline:** The voxel bucketing step (Stage 2) was rewritten from Python into a parallelized Rust tool (`arrowtiles_bucketer`), solving memory constraints and accelerating processing times for the 24.5 GB raw dataset.
-3. **Sub-Pixel Additive Tuning:** Base opacities have been dropped as low as `0.005` to simulate Deepscatter's extremely faint rendering logic, producing smooth, photorealistic Milky Way structure.
-4. **Corrected Galactic Projection & Orientation:** Implemented accurate Equatorial-to-Galactic coordinate transformations in the data pipeline to prevent the dense Milky Way core from being distorted or smeared across spatial chunk boundaries. Additionally, applied WebGPU inverted-Y rendering fixes to ensure the final visual projection matches standard astronomical orientations.
+3. **Arrow IPC Schema Stripping:** To minimize PMTiles metadata bloat, the Arrow IPC schema header (~1KB per tile) is stripped from every chunk by the Rust packer and embedded exactly once into the PMTiles global metadata. `PMTilesClient.ts` asynchronously decodes this schema and dynamically prepends it to chunks to preserve zero-copy WebGPU compatibility while shrinking the total archive size by ~12%.
+4. **Sub-Pixel Additive Tuning:** Base opacities have been dropped as low as `0.005` to simulate Deepscatter's extremely faint rendering logic, producing smooth, photorealistic Milky Way structure.
+5. **Corrected Galactic Projection & Orientation:** Implemented accurate Equatorial-to-Galactic coordinate transformations in the data pipeline to prevent the dense Milky Way core from being distorted or smeared across spatial chunk boundaries. Additionally, applied WebGPU inverted-Y rendering fixes to ensure the final visual projection matches standard astronomical orientations.
 
 ---
 
@@ -114,7 +115,7 @@ To prevent extreme additive blowouts and preserve 60 FPS when looking at the den
 This is a stress test sandbox, and several major architectural challenges remain unresolved:
 
 - **GPU VRAM Spikes:** When panning rapidly, the quadtree traversal can fetch dozens of tiles simultaneously. While we've aggressively tuned `overfetch` to prevent network connection starvation, the engine dynamically creates new WebGPU `InstancedBufferAttributes` when loading these tiles, which can trigger VRAM exhaustion or command queue stalls on lower-end devices.
-- **Initial Payload Size:** The generated `gaia.pmtiles` archive is ~18 GB, which is optimal for Range Requests, but necessitates hosting the archive on a CDN or cloud storage bucket capable of handling sustained byte-range queries efficiently.
+- **Initial Payload Size:** The generated `gaia.pmtiles` archive is ~15.8 GB, which is optimal for Range Requests, but necessitates hosting the archive on a CDN or cloud storage bucket capable of handling sustained byte-range queries efficiently.
 
 ## 📚 Citing
 
