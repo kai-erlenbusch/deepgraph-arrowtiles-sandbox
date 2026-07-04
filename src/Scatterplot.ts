@@ -12,7 +12,7 @@ import type { BoundingBox, TileData } from './PMTilesClient';
 export class Scatterplot {
   public scene: THREE.Scene;
   
-  public maxTiles = 200;
+  public maxTiles = 400;
   public rowsPerTile = 262144;
   public maxGlobalRows = this.maxTiles * this.rowsPerTile;
   
@@ -20,7 +20,6 @@ export class Scatterplot {
   public slotToTileKey: string[] = new Array(this.maxTiles).fill('');
   public slotToTileData: (TileData | null)[] = new Array(this.maxTiles).fill(null);
   public tileKeyToSlot: Map<string, number> = new Map();
-  public globalHoverBuffer: Int32Array = new Int32Array(this.maxGlobalRows * 3);
   
   private quadGeometry = new THREE.PlaneGeometry(1, 1);
 
@@ -30,6 +29,7 @@ export class Scatterplot {
   public layerSpacingUniform = uniform(0.0);
   public maxMagUniform = uniform(15.0);
   public maxIxUniform = uniform(100000000.0); // Kept for API compatibility if needed
+  public currentZoomUniform = uniform(0.0);
   public vpMatrixUniform = uniform(new THREE.Matrix4());
   private rootArea: number;
   private rendererWrapper: Renderer;
@@ -131,25 +131,45 @@ export class Scatterplot {
     const safeRawColor = select(isColorNaN, float(0.0), rawColor);
     
     // Scale and cap the base size 
-    // We gracefully handle both GAIA magnitude (<= 21) and Nomic tokens (> 30)
     const isTokens = safeRawMag.greaterThan(30.0);
     const tokenSize = max(float(0.5), log2(max(safeRawMag, float(1.0))));
-    const gaiaSize = max(float(0.05), float(21.0).sub(safeRawMag).div(float(10.0)));
+    // Boost minimum size so faint dust grains can overlap at deep zoom, but CLAMP maximum size 
+    // so bright foreground stars don't explode into massive fuzzy balls that block the background.
+    const gaiaSize = clamp(float(21.0).sub(safeRawMag).div(float(8.0)), float(0.15), float(4.0));
     const computedSize = select(isTokens, tokenSize, gaiaSize);
     
-    const instanceSize = mix(float(1.2), float(3.0), zoomT).mul(computedSize);
+    // Base linear scaling for Z=0 to Z=3
+    const linearSize = mix(float(1.5), float(3.0), zoomT);
+    const linearOpacity = mix(float(0.04), float(0.12), zoomT);
+    
+    // Deep boost limits: We no longer aggressively scale size to prevent foreground stars from
+    // blowing out deep galaxies. We only slightly boost opacity to preserve additive glow.
+    const deepBoost = max(float(0.0), zoomT.sub(float(0.5)));
+    const instanceSize = linearSize.mul(computedSize);
+    const baseOpacity = clamp(linearOpacity.add(deepBoost.mul(float(0.08))), float(0.02), float(0.25));
+    
+    // The user requested a progressive brightness boost that starts at Z=5 and peaks at Z=11
+    // Z-levels 5-11 correspond to a log2 camera zoom of roughly 3.0 to 9.0
+    const zoomLevel = this.currentZoomUniform;
+    const ultraDeepBoost = smoothstep(float(3.0), float(9.0), zoomLevel);
+    
+    // Isolate the boost to FAINT stars (Magnitude > 16) so that deep clusters like M33 pop, 
+    // but sparse bright foreground Milky Way stars are largely unaffected.
+    const faintStarIsolator = smoothstep(float(15.0), float(19.0), safeRawMag);
+    const targetedDeepBoost = ultraDeepBoost.mul(faintStarIsolator);
+    
+    // Massive opacity and size boost to keep deep stars visible when point density drops
+    const finalOpacityMultiplier = float(1.0).add(targetedDeepBoost.mul(float(4.0))); // Boost up to 5x opacity
+    const finalSizeMultiplier = float(1.0).add(targetedDeepBoost.mul(float(1.5))); // Boost up to 2.5x larger stars
     
     const isVisible = rawMag.greaterThan(0.0)
                       .and(isTokens.or(safeRawMag.lessThanEqual(this.maxMagUniform)));
-    const safeSize = select(isVisible, targetPixels.mul(this.rendererWrapper.worldUnitsPerPixelUniform).mul(instanceSize), float(0.0));
-    // Use a square-root curve (Curve C) so that opacity jumps up quickly to keep Z=2 and Z=3 
-    // relatively close in brightness, but flatten out so we don't wash out at high zooms.
-    const opacityRamp = sqrt(zoomT); 
-    const baseOpacity = mix(float(0.03), float(0.10), opacityRamp);
+    const boostedInstanceSize = instanceSize.mul(finalSizeMultiplier);
+    const safeSize = select(isVisible, targetPixels.mul(this.rendererWrapper.worldUnitsPerPixelUniform).mul(boostedInstanceSize), float(0.0));
     
     // Smoothly fade in stars over 1.0 magnitude unit as they drop below the maxMagUniform threshold
     const magFade = clamp(this.maxMagUniform.sub(safeRawMag), float(0.0), float(1.0));
-    const finalBaseOpacity = select(isTokens, baseOpacity, baseOpacity.mul(magFade));
+    const finalBaseOpacity = select(isTokens, baseOpacity, baseOpacity.mul(magFade)).mul(finalOpacityMultiplier);
     
     const dynamicOpacity = clamp(finalBaseOpacity, float(1.0 / 255.0), float(1.0));
 
@@ -177,7 +197,8 @@ export class Scatterplot {
     
     const threshold = float(1.0 / 255.0);
     const distanceToCenter = distance(uv(), vec2(0.5));
-    const alphaEdge = float(1.0).sub(smoothstep(float(0.35), float(0.5), distanceToCenter));
+    // Soft Gaussian-like falloff from center for beautiful additive blending
+    const alphaEdge = float(1.0).sub(smoothstep(float(0.0), float(0.5), distanceToCenter));
     const finalAlpha = alphaEdge.mul(dynamicOpacity);
 
     const isSubPixelOpacity = finalAlpha.lessThan(threshold);
@@ -282,18 +303,33 @@ export class Scatterplot {
     this.vp.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     this.vpMatrixUniform.value.copy(this.vp);
     
-    const currentZoom = Math.log2(Math.max(1.0, camera.zoom));
+    const currentZoom = Math.log2(Math.max(0.1, (camera as any).zoom || 1.0));
+    this.currentZoomUniform.value = currentZoom;
     
     // Map zoom level to a global magnitude cutoff!
-    // Zoom 0 (fully out): Show up to magnitude 11 (matches Z=1 capacity)
-    // Zoom 5 (fully in): Show up to magnitude 21 (all stars visible)
     if (!this.maxMagUniform) {
         console.error("maxMagUniform is undefined!");
     } else {
-        const minMag = 11.0;
-        const maxMag = 21.0;
-        const zoomRatio = Math.max(0.0, Math.min(1.0, currentZoom / 5.0));
-        this.maxMagUniform.value = minMag + (maxMag - minMag) * zoomRatio;
+        let magOffset = 0;
+        if (currentZoom <= 2.0) {
+            magOffset = 0; // Z=2 and Z=3 stay perfectly clamped at 14.0 for smooth panning
+        } else if (currentZoom <= 3.0) {
+            // Z=4 (currentZoom 2.0 -> 3.0)
+            // Ramp slowly to 15.5 to decrease Z=4 density
+            magOffset = (currentZoom - 2.0) * 1.5; 
+        } else if (currentZoom <= 4.0) {
+            // Z=5 (currentZoom 3.0 -> 4.0)
+            // Spike very hard right at the start of Z=5 so M33 erupts into view early.
+            // Using an easeOut curve, it rapidly hits Mag 18+ within the first 25% of Z=5.
+            const t = currentZoom - 3.0;
+            magOffset = 1.5 + (t * (2.0 - t)) * 5.5; 
+        } else {
+            // Z=6+ (currentZoom 4.0+)
+            // Fully saturated to Mag 21.0
+            magOffset = 7.0;
+        }
+        
+        this.maxMagUniform.value = Math.min(21.0, 14.0 + magOffset);
     }
   }
 
@@ -409,14 +445,7 @@ export class Scatterplot {
             st.clearUpdateRanges();
             st.addUpdateRange(0, numItems);
             st.needsUpdate = true;
-        }
-        
-        if (tile.hoverBuffer) {
-            const offset = slot * this.rowsPerTile;
-            this.globalHoverBuffer.set(tile.hoverBuffer.subarray(0, numItems), offset * 3);
-        }
-
-        tile.needsUpdate = false;
+        }        tile.needsUpdate = false;
       }
       
       this.slotMeshes[slot].visible = geo.instanceCount > 0;
@@ -461,15 +490,15 @@ export class Scatterplot {
       const globalY = tileOriginY + (rawY * scale);
       
       const mappedX = globalX * 4.0 - 2.0;
-      const mappedY = 1.0 - globalY * 2.0;
+      const mappedY = 1.0 - rawY * 2.0;
       
       this.hoverMesh.position.set(mappedX, mappedY, 0.0);
       
       // Sync hover scale precisely with the visual shader scale
-      const currentZoom = Math.log2(Math.max(1.0, this.rendererWrapper.camera.zoom));
-      const zoomT = Math.max(0, Math.min(1.0, currentZoom / 6.0));
+      // Remove tile-based fading to fix density bands
+      const zoomT = Math.max(0, currentZoom / 6.0);
       const targetPixels = 1.0 * (1.0 - zoomT) + 2.0 * zoomT;
-      const baseInstanceSize = 0.8 * (1.0 - zoomT) + 3.0 * zoomT;
+      const baseInstanceSize = 1.2 * (1.0 - zoomT) + 2.2 * zoomT;
       const rawMag = sizeBuffer[rowIndex];
       
       let computedSize = 0;
@@ -486,10 +515,17 @@ export class Scatterplot {
       
       let hoverText = `Tile: ${tileKey}<br/>Row: ${rowIndex}`;
       
-      // Global hover buffer uses 3 Int32s per row
-      const global_id = this.globalHoverBuffer[globalId * 3 + 0];
-      const model_id = this.globalHoverBuffer[globalId * 3 + 1];
-      const num_of_tokens = this.globalHoverBuffer[globalId * 3 + 2];
+      // Lookup directly from tile data to avoid giant array allocation
+      const slot = Math.floor(globalId / this.rowsPerTile);
+      // rowIndex is already defined earlier
+      const tileData = this.slotToTileData[slot];
+      
+      let global_id = 0, model_id = 0, num_of_tokens = 0;
+      if (tileData && tileData.hoverBuffer && (rowIndex * 3 + 2) < tileData.hoverBuffer.length) {
+          global_id = tileData.hoverBuffer[rowIndex * 3 + 0];
+          model_id = tileData.hoverBuffer[rowIndex * 3 + 1];
+          num_of_tokens = tileData.hoverBuffer[rowIndex * 3 + 2];
+      }
       
       if (global_id !== 0 || model_id !== 0 || num_of_tokens !== 0) {
          hoverText = `Global ID: ${global_id}<br/>Model ID: ${model_id}<br/>Tokens: ${num_of_tokens}`;

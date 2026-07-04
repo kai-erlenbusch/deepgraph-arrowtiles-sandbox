@@ -141,7 +141,10 @@ export class PMTilesClient {
         this.currentlyVisibleIds.clear();
 
         // Additive Quadtree: We must fetch all parent tiles from root (Z=0) up to currentZ
+        // Automatic Budgeting: We drill as deep as possible for maximum density, 
+        // as long as the LOD layer does not require more than 256 tiles on screen.
         let plannedTiles = 0;
+        let actualMaxZ = 0;
         for (let cz = 0; cz <= z; cz++) {
             const numTiles = 1 << cz;
             const width = (this.rootBounds.maxX - this.rootBounds.minX) / numTiles;
@@ -156,10 +159,13 @@ export class PMTilesClient {
             const countY = endY - startY + 1;
             const tilesInLOD = countX * countY;
             
+            // Budget limits: Don't overflow the LRU cache.
             if (plannedTiles + tilesInLOD > this.maxCacheSize - 10) {
                 break;
             }
             plannedTiles += tilesInLOD;
+            actualMaxZ = cz;
+            this.currentMaxZ = cz;
 
             for (let x = startX; x <= endX; x++) {
                 for (let y = startY; y <= endY; y++) {

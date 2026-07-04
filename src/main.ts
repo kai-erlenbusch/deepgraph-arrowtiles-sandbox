@@ -60,8 +60,8 @@ async function init() {
   
   const scatterplot = new Scatterplot(rendererWrapper.scene, rendererWrapper, rootBounds);
   
-  // 2. Initialize the PMTiles client and pass maxTiles for LRU Cache
-  const tileManager = new PMTilesClient(TILE_SERVER_URL, rootBounds, scatterplot.maxTiles);
+  // 2. Initialize the PMTiles client and pass 2000 for LRU Cache
+  const tileManager = new PMTilesClient(TILE_SERVER_URL, rootBounds, 2000);
   window.tileManagerInstance = tileManager;
   
   uiText.innerHTML = `WebGPU is supported!<br/>Streaming Quadtree Tiles...`;
@@ -76,8 +76,10 @@ async function init() {
     });
   }
 
+  // Detail is now perfectly tied to camera zoom.
 
-  
+
+
   rendererInstance = rendererWrapper;
   scatterplotInstance = scatterplot;
 
@@ -190,7 +192,7 @@ async function init() {
       const t0 = performance.now();
       
       const cam = rendererWrapper.camera as THREE.OrthographicCamera;
-      const currentZoom = Math.log2(Math.max(1.0, cam.zoom));
+      const currentZoom = Math.log2(Math.max(0.1, cam.zoom));
       
       let t1 = performance.now();
       
@@ -212,23 +214,16 @@ async function init() {
       const camHash = `${cam.position.x},${cam.position.y},${cam.zoom}`;
       const w = window as any;
       
-      // Prevent network/VRAM explosion: Limit absolute max depth based on zoom.
-      // We tune overfetch so that we never load more than ~85 tiles concurrently.
-      let overfetch = 1;
-      const latency = w.lastNetLatency || 0;
-      if (latency > 200) {
-          overfetch = 0; // Throttle fetching on slow networks
-      } else if (currentZoom < 2.0) {
-          overfetch = 2; // at z=0..1, fetch up to z=2..3 (max 21-85 tiles)
-      } else if (currentZoom < 3.0) {
-          overfetch = 1; // at z=2, fetch up to z=3 (frustum culled)
-      }
-      
-      const currentZ = Math.min(14, Math.floor(currentZoom) + overfetch);
-      
       let hasPendingUpdates = w.hasPendingUpdates || false;
+      
+      // 2. Fetch visible tiles only when camera moves or cache updates
+      // Pure Google Maps Math: Target tile pixel-density directly from zoom level.
+      // Math.log2() naturally steps exactly by powers of 2, perfectly matching the quadtree depth.
+      // We add +2 as a constant visual density offset (Google Maps typically overfetches by ~1-2 Z levels for sharpness).
+      const detailOffset = 2;
+      const currentZ = Math.min(14, Math.floor(currentZoom) + detailOffset);
+      
       if (w.lastCamHash !== camHash || tileManager.cacheChanged || hasPendingUpdates) {
-          // 2. Fetch visible tiles only when camera moves or cache updates
           activeVisibleTiles = tileManager.getVisibleTiles(frustumBox, currentZ);
           t1 = performance.now();
           
@@ -236,6 +231,7 @@ async function init() {
           w.hasPendingUpdates = scatterplot.updateTiles(activeVisibleTiles);
           
           w.lastCamHash = camHash;
+          w.currentZDisplay = tileManager.currentMaxZ;
           tileManager.cacheChanged = false;
       }
       
@@ -290,9 +286,9 @@ async function init() {
          
          const perf = w.lastPerfReport;
          uiText.innerHTML = `
-           <b>Streaming Quadtree</b> (Z=${currentZ})<br/>
-           FPS: <b>${perf.fps}</b><br/>
-           Camera Zoom: <b>${currentZoom.toFixed(2)}</b><br/>
+           Streaming Quadtree (Z=${w.currentZDisplay ?? 0})
+        FPS: ${perf.fps}
+        Camera Zoom: ${cam.zoom.toFixed(2)}</b><br/>
            Tiles active: ${activeVisibleTiles.length} (${vramMB} MB VRAM)<br/>
            Points rendered: ${(totalPoints / 1000000).toFixed(2)} Million<br/>
            Tile load latency: <b>Net</b> ${netLatency}ms | <b>Worker</b> ${workerLatency}ms

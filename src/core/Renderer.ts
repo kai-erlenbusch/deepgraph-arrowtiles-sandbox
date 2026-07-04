@@ -52,7 +52,8 @@ export class Renderer {
       1000
     );
     this.camera.position.set(0.0, 0.0, 5.0); 
-    this.camera.zoom = 6.0;
+    // Start exactly at 1.61 per user screenshot
+    this.camera.zoom = 1.61;
     this.camera.updateProjectionMatrix();
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
@@ -161,8 +162,8 @@ export class Renderer {
     this.zoomUniform.value = this.camera.zoom; 
     this.dprUniform.value = window.devicePixelRatio;
 
-    const currentZoom = Math.log2(Math.max(1.0, this.camera.zoom));
-    this.zoomTUniform.value = Math.max(0.0, Math.min(1.0, currentZoom / 6.0));
+    const currentZoom = Math.log2(Math.max(0.1, this.camera.zoom));
+    this.zoomTUniform.value = Math.max(0.0, currentZoom / 6.0);
     
     if (this.postProcessing) {
       this.postProcessing.render();

@@ -107,7 +107,7 @@ To prevent extreme additive blowouts and preserve 60 FPS when looking at the den
 3. **Arrow IPC Schema Stripping:** To minimize PMTiles metadata bloat, the Arrow IPC schema header (~1KB per tile) is stripped from every chunk by the Rust packer and embedded exactly once into the PMTiles global metadata. `PMTilesClient.ts` asynchronously decodes this schema and dynamically prepends it to chunks to preserve zero-copy WebGPU compatibility while shrinking the total archive size by ~12%.
 4. **Sub-Pixel Additive Tuning:** Base opacities have been dropped as low as `0.005` to simulate Deepscatter's extremely faint rendering logic, producing smooth, photorealistic Milky Way structure.
 5. **Corrected Galactic Projection & Orientation:** Implemented accurate Equatorial-to-Galactic coordinate transformations in the data pipeline to prevent the dense Milky Way core from being distorted or smeared across spatial chunk boundaries. Additionally, applied WebGPU inverted-Y rendering fixes to ensure the final visual projection matches standard astronomical orientations.
-
+6. **Zoom-Linked Dynamic Cluster Boosting:** Replaced arbitrary max-tile budgeting with a geometrically accurate mapping between the camera frustum and Quadtree Z-levels. Additionally, the WebGPU shader now selectively isolates **faint cluster stars** (Magnitude > 15) and mathematically applies an `easeOut` curve as the camera zooms into them. This allows deep structures like M33 to dynamically increase in physical size (2.5x) and opacity (5x) without blooming the bright, sparse foreground stars in the Milky Way.
 ---
 
 ## ⚠️ Known Challenges & Current Limitations
