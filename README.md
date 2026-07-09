@@ -38,9 +38,10 @@ The 2-pass IPC architecture completely bypasses FFI (Foreign Function Interface)
 
 Below are performance and profiling snapshots taken during the WebGPU render loop stress test of the 1.35 Billion row dataset:
 
-![GAIA Benchmark 1](./assets/performance_1.png)
-![GAIA Benchmark 2](./assets/performance_2.png)
 ![GAIA Benchmark 3](./assets/performance_3.png)
+![GAIA Benchmark 2](./assets/performance_2.png)
+![GAIA Benchmark 1](./assets/performance_1.png)
+
 
 ---
 
