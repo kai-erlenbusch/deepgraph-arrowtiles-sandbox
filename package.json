@@ -13,15 +13,16 @@
     "vite": "^8.0.12"
   },
   "dependencies": {
+    "@bokuweb/zstd-wasm": "^0.0.27",
     "@types/gl-matrix": "^2.4.5",
     "@types/stats.js": "^0.17.4",
-    "@types/three": "^0.184.1",
+    "@types/three": "^0.172.0",
     "apache-arrow": "^21.1.0",
-    "fzstd": "^0.1.1",
     "gl-matrix": "^3.4.4",
+    "lil-gui": "^0.21.0",
     "p-queue": "^9.3.0",
     "pmtiles": "^4.4.1",
     "stats.js": "^0.17.0",
-    "three": "^0.184.0"
+    "three": "^0.172.0"
   }
 }

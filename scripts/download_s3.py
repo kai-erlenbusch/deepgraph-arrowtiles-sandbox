@@ -1,6 +1,7 @@
 import duckdb
 import time
 import os
+from tqdm import tqdm
 
 def main():
     print("Fetching list of 2017 files from S3...")
@@ -9,22 +10,24 @@ def main():
     res = conn.execute("SELECT file FROM glob('s3://stpubdata/gaia/gaia_dr3/public/hats/gaia/dataset/**/*.parquet')").fetchall()
     urls = [r[0] for r in res]
     
-    os.makedirs("s3_cache", exist_ok=True)
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    cache_dir = os.path.join(base_dir, "..", "s3_cache")
+    os.makedirs(cache_dir, exist_ok=True)
     
     batch_size = 50
     total_batches = (len(urls) + batch_size - 1) // batch_size
     
     print(f"Found {len(urls)} files. Processing in {total_batches} batches...")
     
-    for i in range(total_batches):
+    for i in tqdm(range(total_batches), desc="Downloading Batches", unit="batch"):
         batch_urls = urls[i * batch_size : (i + 1) * batch_size]
-        output_file = f"s3_cache/batch_{i:03d}.parquet"
+        output_file = os.path.join(cache_dir, f"batch_{i:03d}.parquet")
         
         if os.path.exists(output_file):
-            print(f"Skipping batch {i} (already exists)")
+            tqdm.write(f"Skipping batch {i} (already exists)")
             continue
             
-        print(f"[{time.strftime('%H:%M:%S')}] Processing batch {i}/{total_batches} ({len(batch_urls)} files)...")
+        tqdm.write(f"[{time.strftime('%H:%M:%S')}] Processing batch {i}/{total_batches} ({len(batch_urls)} files)...")
         
         urls_str = ",\n".join(f"'{u}'" for u in batch_urls)
         
@@ -33,11 +36,12 @@ def main():
         query = f"""
             COPY (
                 SELECT 
-                    ra, dec, phot_g_mean_mag AS magnitude, bp_rp AS bv
+                    ra, dec, parallax, phot_g_mean_mag AS magnitude, bp_rp AS bv,
+                    pmra, pmdec, radial_velocity, teff_gspphot
                 FROM read_parquet([
                     {urls_str}
                 ])
-                WHERE ra IS NOT NULL AND dec IS NOT NULL AND phot_g_mean_mag IS NOT NULL AND bp_rp IS NOT NULL
+                WHERE ra IS NOT NULL AND dec IS NOT NULL AND phot_g_mean_mag IS NOT NULL AND bp_rp IS NOT NULL AND parallax IS NOT NULL
             ) TO '{output_file}' (FORMAT PARQUET)
         """
         
@@ -49,20 +53,20 @@ def main():
             temp_conn.execute(query)
             elapsed = time.time() - start_time
             size_mb = os.path.getsize(output_file) / (1024 * 1024)
-            print(f"  -> Batch {i} completed in {elapsed:.1f}s. File size: {size_mb:.1f} MB")
+            tqdm.write(f"  -> Batch {i} completed in {elapsed:.1f}s. File size: {size_mb:.1f} MB")
         except (duckdb.Error, OSError) as e:
-            print(f"  -> Error in batch {i}: {e}")
+            tqdm.write(f"  -> Error in batch {i}: {e}")
             if os.path.exists(output_file):
                 os.remove(output_file)
-            print("  -> Retrying in 5 seconds...")
+            tqdm.write("  -> Retrying in 5 seconds...")
             time.sleep(5)
             try:
                 temp_conn.execute(query)
                 elapsed = time.time() - start_time
                 size_mb = os.path.getsize(output_file) / (1024 * 1024)
-                print(f"  -> Batch {i} completed on retry in {elapsed:.1f}s. File size: {size_mb:.1f} MB")
+                tqdm.write(f"  -> Batch {i} completed on retry in {elapsed:.1f}s. File size: {size_mb:.1f} MB")
             except (duckdb.Error, OSError) as e2:
-                print(f"  -> Retry failed: {e2}")
+                tqdm.write(f"  -> Retry failed: {e2}")
 
 if __name__ == '__main__':
     main()

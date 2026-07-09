@@ -4,15 +4,14 @@
 
 ---
 
-## 1. The Inspiration: Deepscatter & Quadfeather
-This project is deeply inspired by **Deepscatter** and **Quadfeather**, created by Ben Schmidt (Nomic AI). 
-Deepscatter was revolutionary because it solved a massive problem in data visualization: **How do you render over a billion points in a web browser?**
+## 1. The Lineage & Inspiration
+This ecosystem is a direct successor to the groundbreaking work by Ben Schmidt (Nomic AI). To understand what we are building, you must understand what came before it:
 
-Traditional WebGL engines choke on a few hundred thousand points. Deepscatter achieved this by:
-1. **Quadfeather**: A C++ script that partitions giant CSV/Parquet datasets into a spatial quadtree, sorting points by their "significance" (e.g., brightness, population) and saving them into thousands of tiny Apache Arrow `.feather` files.
-2. **Deepscatter (Frontend)**: A custom WebGL renderer that traverses this quadtree, loading tiles on-demand as the user zooms in, rendering points using instanced geometry and additive blending to create beautiful, density-mapped visualizations.
+- **[Deepscatter](https://github.com/nomic-ai/deepscatter/)**: A custom WebGL renderer that loads tiles on-demand, using instanced geometry and additive blending to visualize billions of points.
+- **[Quadfeather](https://github.com/bmschmidt/quadfeather/)**: The C++ pipeline that partitioned giant CSV/Parquet datasets into a spatial quadtree, saving them as thousands of tiny Apache Arrow `.feather` files for Deepscatter to read.
+- **[The Gaia Sandbox](https://benschmidt.org/gaia/gaia.html)**: Ben Schmidt's stress test rendering 1.8 billion stars from the ESA Gaia catalog. It is the benchmark we are measuring ourselves against.
 
-If you haven't seen it in action, research Ben Schmidt's **Gaia** visualization (rendering 1.8 billion stars from the ESA Gaia catalog). It is the benchmark we are measuring ourselves against.
+Deepscatter was revolutionary because it solved a massive problem in data visualization: **How do you render over a billion points in a web browser?** Traditional WebGL engines choke on a few hundred thousand points. Deepscatter and Quadfeather solved this by streaming quadtrees of Arrow buffers directly to the GPU.
 
 ---
 
@@ -31,7 +30,13 @@ Quadfeather is a complex C++ tool that can be difficult to compile, extend, or i
 ---
 
 ## 3. Our Solution: DeepGraph + ArrowTiles
-**DeepGraph ArrowTiles** is the modern successor. The core concept is **"PMTiles for Scatterplots"**.
+To solve these limitations, we built a modern ecosystem with a direct 1-to-1 lineage to its predecessors:
+
+- **DeepGraph**: The WebGPU successor to the *Deepscatter* frontend.
+- **ArrowTiles**: The DuckDB/Rust successor to the *Quadfeather* data pipeline.
+- **Sandbox**: The exact repository you are in right now—our playground to stress test DeepGraph and ArrowTiles together, exactly the same way Nomic AI did with their Gaia dataset.
+
+The core concept is **"PMTiles for Scatterplots"**.
 
 Instead of writing thousands of files, we write a **single, unified `.pmtiles` archive**. 
 
@@ -44,7 +49,7 @@ We leverage **DuckDB** for out-of-core data processing and a custom **Rust** CLI
 ### The Frontend: WebGPU & HTTP Range Requests
 Instead of WebGL, we built a modern **WebGPU** engine using Three.js.
 - **Range Requests:** The `PMTilesClient` parses the `.pmtiles` directory structure and uses **HTTP Range Requests** to fetch only the exact byte-ranges of the Arrow IPC chunks it needs directly from the single file. This is highly efficient and CDN-friendly.
-- **Zero-Copy Arrays:** The Apache Arrow IPC chunks are parsed natively into `Float32Arrays` in a Web Worker and passed directly to the GPU buffers with zero overhead.
+- **Zero-Copy Arrays & Multithreading:** The Apache Arrow IPC chunks are decompressed (Zstd) and parsed natively into `Float32Arrays` using a multi-threaded Round-Robin Web Worker pool. These TypedArrays are then passed directly to the GPU buffers with zero overhead, keeping the Main UI thread completely unblocked.
 
 ---
 
@@ -64,9 +69,18 @@ We fixed this by removing the local point limit and implementing **Global Magnit
 
 ---
 
-## 5. Instructions for Agents
-If you are an AI agent tasked with modifying this codebase, keep these constraints in mind:
-1. **Performance over Everything:** This is a stress test. 1.8 billion points is no joke. Do not introduce O(N) JavaScript loops over the data arrays on the main thread.
-2. **WebGPU Nuances:** Additive blending without depth testing is extremely expensive on fill rate. Keep point quad sizes small at low zooms.
-3. **Network Limits:** Browsers limit concurrent HTTP connections to a domain (usually ~6). Do not allow the Quadtree to blindly fetch hundreds of tiles, or the browser will stall with `net::ERR_INSUFFICIENT_RESOURCES`. Always tune the `overfetch` logic.
-4. **Rust for Heavy Lifting:** If Stage 2 data processing needs to be modified, do it in `scripts/arrowtiles_bucketer/src/main.rs`. Do not attempt to process 24 GB of data natively in Python loops.
+## 5. LLM Onboarding & Agent Handoff Instructions
+**CRITICAL RULE FOR AI AGENTS:** This ecosystem is split into two physical sibling repositories on the filesystem. Depending on your task, you MUST navigate to the correct directory:
+
+1. **Frontend & Pipeline (`deepgraph` sandbox):**
+   - **Path:** `D:\exploratory\duckdb-extension\deepgraph-arrowtiles-sandbox`
+   - **What lives here:** The WebGPU application (`src/`), the Python pipeline coordinator (`generate_pipeline.py`), and all web assets.
+   - **Caution (Agent Memory):** The `logs/` directory contains transcripts, implementation plans, research reports, and walkthroughs from past agent sessions. If you need historical context on *why* a decision was made, read the files in `logs/` before asking the user.
+   - **Constraint:** Performance over everything. Do not introduce O(N) JavaScript loops over the data arrays on the main thread. Additive blending without depth testing is extremely expensive on fill rate. Keep point quad sizes small at low zooms.
+
+2. **Backend Engine (`arrowtiles`):**
+   - **Path:** `D:\exploratory\duckdb-extension\duckdb-arrowtiles`
+   - **What lives here:** The core Rust logic for spatial partitioning (`src/bin/bucketer.rs`) and Arrow IPC packing (`src/bin/packer.rs`). 
+   - **Constraint:** If Stage 2 data processing needs to be modified, do it here. Do not attempt to process 24 GB of data natively in Python loops.
+
+**Handoff Protocol:** If a user asks you to review or modify `deepgraph`, you stay in the sandbox folder. If the user asks you to review or modify `arrowtiles`, you must immediately traverse to the `duckdb-arrowtiles` sibling directory before searching for files or proposing edits.

@@ -1,17 +1,19 @@
+# Node and Vite
 node_modules/
-.DS_Store
-*.parquet
-*.pmtiles
-*.feather
-*.gz
-*.csv
-data/
-logs/
-*.log
-__pycache__/
-.duckdb/
-.env
 dist/
-build/
-duckdb_temp/
+dist-ssr/
+.npm/
+
+# Data Files
 s3_cache/
+public/*.arrowtiles
+public/*.pmtiles
+public/*.parquet
+duckdb_temp/
+legacy_pipeline/
+scratch/
+
+# IDE and OS
+.vscode/
+.idea/
+.DS_Store

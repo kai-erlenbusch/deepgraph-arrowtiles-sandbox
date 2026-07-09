@@ -11,7 +11,10 @@ export default defineConfig({
       allow: ['.']
     },
     watch: {
-      ignored: ['.gemini/**', '.system_generated/**', '**/.gemini/**', '**/.system_generated/**']
+      ignored: ['.gemini/**', '.system_generated/**', '**/.gemini/**', '**/.system_generated/**', '**/*.pmtiles']
     }
   },
+  optimizeDeps: {
+    exclude: ['three', 'three/webgpu', 'three/tsl', 'apache-arrow', 'pmtiles', 'lil-gui']
+  }
 });

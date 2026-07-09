@@ -1,0 +1,56 @@
+Sandbox Performance Upgrades 2026-06-07
+This implementation plan details the architectural upgrades to the WebGPU sandbox (deepgraph-webgpu-sandbox) to resolve the 50 million point stress-test bottlenecks, based on the architectural reviews.
+
+User Review Required
+WARNING
+
+Implementing True Zero-Copy from Arrow to WebGPU will require changing the geometry format from a single InterleavedBuffer to multiple distinct InstancedBufferAttributes for X, Y, and Z. Please review the proposed changes below before I proceed.
+
+Findings
+Grid Alignment IS Correct: My previous hypothesis that the TileManager padded the root bounds turned out to be false. The system correctly reads the exact global_bounds from index.json, and mathematically subdivides the TileNode bounds with absolute precision. The red wireframe boxes seen in the screenshots represent the mathematically correct Quadfeather boundaries.
+Dataset Bias (The Real Bug): The Quadfeather backend groups spatial points by traversing a Z-order (Morton) curve, and chunks them into 65,536-point files. When generating a "parent" tile, it appears to sample the first 65k points of the sequence rather than taking a uniform random sample across the whole tile.
+Additive LOD Artifacts: Because the parent tile only contains points from the beginning of its Z-order curve, all 65k points are clustered tightly in one corner of the parent's bounding box. With Additive LOD (rendering the parent and children simultaneously), zooming in causes the dense 65k block from the parent tile to visually overlap with the correctly-distributed child tiles. This creates the sharp square boundaries ("glitched out areas") that stop arbitrarily without aligning to a grid line, confusing the rendering.
+Proposed Changes
+src/data/TileManager.ts
+I propose switching the renderer from Additive LOD to Exclusive LOD.
+
+[MODIFY]
+TileManager.ts
+Change the getVisibleTiles traversal loop so that parent tiles are hidden as soon as they subdivide into child tiles.
+
+Implement a Hold-Parent-Until-Children-Load mechanism to prevent blinking. A parent tile will remain visible only if its intersecting child tiles are still streaming from the network.
+Once the child tiles finish loading, the heavily-biased parent tile is removed from the active render list, instantly hiding the dense square blocks.
+Data Ingestion (Zero-Copy Worker)
+We will modify the WebWorker to stop re-packing the Arrow arrays and instead pass them directly to the main thread.
+
+[MODIFY]
+ArrowWorker.ts
+Remove the Float32Array interleaved geomBuffer creation.
+Keep the xCol, yCol, and zCol as raw Float32Arrays.
+Post the raw xCol.buffer, yCol.buffer, and zCol.buffer (if it exists) directly to the main thread via Transferable Objects.
+Update the worker postMessage payload to include these separate buffers instead of a unified geomBuffer.
+Quadtree Engine (Network Waterfall)
+We will decouple Quadtree traversal from the network fetch state.
+
+[MODIFY]
+TileManager.ts
+Update TileData interface to match the new separate buffers (xBuffer, yBuffer, zBuffer) instead of geomBuffer.
+Modify getVisibleTiles to mathematically calculate shouldSubdivide regardless of whether the current node's tileData is loaded.
+If shouldSubdivide is true, eagerly traverse and add the intersecting children to the queue so they can be fetched immediately.
+Only add a node's tileData to visibleTiles if it is fully loaded.
+Scene Rendering (GPU Thrashing & Zero-Copy Geo)
+We will update the Scatterplot manager to handle the new un-interleaved buffers and stop destroying WebGPU buffers every time the camera pans.
+
+[MODIFY]
+main.ts
+Zero-Copy Geometry: In addTile, replace the single THREE.InstancedInterleavedBuffer with three separate THREE.InstancedBufferAttribute declarations (offsetX, offsetY, offsetZ).
+TSL Updates: Update the TSL shader definition to read these three separate attributes and construct the vec3 offset mathematically.
+Hover Logic Update: Update updateHover to read the spatial coordinates from the separated offsetX.array, offsetY.array, and offsetZ.array attributes instead of the old interleaved buffer.
+GPU Thrashing: In updateTiles, instead of removing meshes and calling mesh.geometry.dispose() when they leave the frustum, we will set mesh.visible = false. We will also implement a simple cleanup condition if the total number of cached meshes exceeds a certain threshold (e.g., > 1000) to prevent permanent memory leaks.
+Hover Crash: Add let closestTileZ = -1; to performCPUPicking to prevent the ReferenceError.
+Verification Plan
+Manual Verification
+Start the sandbox dev server.
+Verify that zooming in loads multiple LOD tiles simultaneously instead of one by one.
+Verify that panning left and right does not cause GC stutters or frame drops.
+Verify that hovering deep into the cluster correctly identifies points without crashing.

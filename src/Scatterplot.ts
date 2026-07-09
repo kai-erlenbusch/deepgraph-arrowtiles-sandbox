@@ -1,35 +1,53 @@
+// @ts-nocheck
 import * as THREE from 'three';
 import { MeshBasicNodeMaterial, StorageInstancedBufferAttribute } from 'three/webgpu';
 // @ts-ignore - TSL types are highly experimental and incomplete
 import { 
   attribute, float, positionLocal, vec3, vec4, vec2, uv, distance, smoothstep,
-  hash, instanceIndex, max, select, uint, mix, clamp, log2, uniform, varying, instancedArray, storage, cameraProjectionMatrix, cameraViewMatrix, atomicAdd, time, userData, sqrt
+  hash, instanceIndex, max, select, uint, mix, clamp, log2, uniform, varying, instancedArray, storage, cameraProjectionMatrix, cameraViewMatrix, atomicAdd, time, userData, sqrt, sin, cos
 } from 'three/tsl';
 import { Renderer } from './core/Renderer';
 import type { BoundingBox, TileData } from './PMTilesClient';
+
+export interface EncodingConfig {
+    x?: { field: string, transform?: 'literal' | 'linear', domain?: [number, number], range?: [number, number] };
+    y?: { field: string, transform?: 'literal' | 'linear', domain?: [number, number], range?: [number, number] };
+    color?: { field: string, range: 'rdbu' | 'viridis', domain?: [number, number] };
+    size?: { field: string, domain?: [number, number], range?: [number, number] };
+    jitter?: { method: 'circle' | 'spiral', speed: number, radius: number };
+}
 
 
 export class Scatterplot {
   public scene: THREE.Scene;
   
-  public maxTiles = 400;
+  public maxTiles = 200;
   public rowsPerTile = 262144;
   public maxGlobalRows = this.maxTiles * this.rowsPerTile;
   
   public slotMeshes: THREE.Mesh[] = [];
   public slotToTileKey: string[] = new Array(this.maxTiles).fill('');
+  public currentConfig: EncodingConfig = {
+      x: { field: 'x_u16', transform: 'linear', domain: [0, 1], range: [-2, 2] },
+      y: { field: 'y_u16', transform: 'linear', domain: [0, 1], range: [1, -1] },
+      color: { field: 'bp_rp', range: 'viridis', domain: [-0.5, 2.5] },
+      size: { field: 'abs_m' }
+  };
+  public previousConfig: EncodingConfig = this.currentConfig;
+  public transitionTUniform = uniform(1.0);
+  public isTransitioning = false;
+  public modeUniform = uniform(0.0);
+
   public slotToTileData: (TileData | null)[] = new Array(this.maxTiles).fill(null);
   public tileKeyToSlot: Map<string, number> = new Map();
   
   private quadGeometry = new THREE.PlaneGeometry(1, 1);
 
-  public pickingRenderTarget: THREE.RenderTarget;
-  public hoverMesh: THREE.Mesh;
-  public hoverColorUniform: any;
   public layerSpacingUniform = uniform(0.0);
   public maxMagUniform = uniform(15.0);
   public maxIxUniform = uniform(100000000.0); // Kept for API compatibility if needed
   public currentZoomUniform = uniform(0.0);
+  public globalTimeUniform = uniform(0.0);
   public vpMatrixUniform = uniform(new THREE.Matrix4());
   private rootArea: number;
   private rendererWrapper: Renderer;
@@ -39,37 +57,8 @@ export class Scatterplot {
     this.rendererWrapper = rendererWrapper;
     this.rootArea = (rootBounds.maxX - rootBounds.minX) * (rootBounds.maxY - rootBounds.minY);
 
-    this.hoverColorUniform = uniform(new THREE.Color(0xffffff));
-    const hoverGeo = new THREE.PlaneGeometry(1, 1);
-    const hoverMat = new MeshBasicNodeMaterial({ 
-      transparent: true, 
-      depthTest: false,
-      blending: THREE.NormalBlending,
-      side: THREE.DoubleSide
-    });
-    
-    const d = distance(uv(), vec2(0.5));
-    const isBorder = d.greaterThan(0.35);
-    const finalColor = select(isBorder, vec3(0.0, 0.0, 0.0), this.hoverColorUniform);
-    hoverMat.colorNode = finalColor;
-    hoverMat.opacityNode = select(d.lessThan(0.5), float(1.0), float(0.0));
-    
-    this.hoverMesh = new THREE.Mesh(hoverGeo, hoverMat);
-    this.hoverMesh.visible = false;
-    this.scene.add(this.hoverMesh);
-
-    this.pickingRenderTarget = new THREE.RenderTarget(1, 1, {
-      format: THREE.RGBAFormat,
-      type: THREE.UnsignedByteType,
-      depthBuffer: true,
-      colorSpace: THREE.NoColorSpace,
-      magFilter: THREE.NearestFilter,
-      minFilter: THREE.NearestFilter
-    });
-
     // 1. Pre-allocate 800 discrete meshes, perfectly chunking the geometry
     const mainMaterial = this.createMainMaterial();
-    const pickingMaterial = this.createPickingMaterial();
 
     for (let i = 0; i < this.maxTiles; i++) {
         const geo = new THREE.InstancedBufferGeometry();
@@ -78,18 +67,23 @@ export class Scatterplot {
         geo.attributes.uv = this.quadGeometry.attributes.uv;
         
         // Use standard WebGPU Instanced Attributes
-        geo.setAttribute('offsetXY', new THREE.InstancedBufferAttribute(new Uint16Array(this.rowsPerTile * 2), 2, true));
+        geo.setAttribute('offsetX', new THREE.InstancedBufferAttribute(new Uint16Array(this.rowsPerTile), 1, true));
+        geo.setAttribute('offsetY', new THREE.InstancedBufferAttribute(new Uint16Array(this.rowsPerTile), 1, true));
         geo.setAttribute('pointIx', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile), 1));
         geo.setAttribute('instanceColor', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile), 1));
         geo.setAttribute('instanceSize', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile), 1));
         geo.setAttribute('spawnTime', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile).fill(-1000.0), 1));
+        geo.setAttribute('parallax', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile), 1));
+        geo.setAttribute('teff', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile), 1));
+        geo.setAttribute('pmra', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile), 1));
+        geo.setAttribute('pmdec', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile), 1));
+        geo.setAttribute('rv', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile), 1));
         
         geo.instanceCount = 0; // Initialize empty to prevent garbage rendering
 
         const mesh = new THREE.Mesh(geo, mainMaterial);
         mesh.frustumCulled = false; // We do our own Zero-Cost GPU culling via mesh.visible
         mesh.visible = false;
-        mesh.userData.pickingMaterial = pickingMaterial;
         mesh.userData.slotIndex = i; // Assign Slot ID natively for picking shader
         mesh.userData.tileOffsetX = 0.0;
         mesh.userData.tileOffsetY = 0.0;
@@ -100,13 +94,67 @@ export class Scatterplot {
     }
   }
 
-  private createMainMaterial() {
+  public updateEncoding(config: EncodingConfig) {
+      this.previousConfig = { ...this.currentConfig };
+      this.currentConfig = { ...this.currentConfig, ...config };
+      
+      const newMaterial = this.createMainMaterial(this.previousConfig, this.currentConfig);
+      for (let i = 0; i < this.maxTiles; i++) {
+          if (this.slotMeshes[i]) {
+              this.slotMeshes[i].material = newMaterial;
+          }
+      }
+      
+      this.startTransition();
+  }
+
+  private startTransition() {
+      if (this.isTransitioning) return;
+      this.isTransitioning = true;
+      
+      const startTime = performance.now();
+      const duration = 2000; // 2 seconds
+      
+      const animate = () => {
+          const now = performance.now();
+          let progress = (now - startTime) / duration;
+          if (progress > 1.0) progress = 1.0;
+          
+          // Smoothstep easing for a cinematic transition
+          const t = progress * progress * (3 - 2 * progress);
+          this.transitionTUniform.value = t;
+          
+          if (progress < 1.0) {
+              requestAnimationFrame(animate);
+          } else {
+              this.isTransitioning = false;
+          }
+      };
+      
+      requestAnimationFrame(animate);
+  }
+
+  private createMainMaterial(prevConfig: EncodingConfig = this.currentConfig, currConfig: EncodingConfig = this.currentConfig) {
     // Abstracted TSL inputs allow ALL 800 meshes to perfectly share this 1 Pipeline!
     const rawColor = float(attribute('instanceColor', 'float'));
     const rawMag = float(attribute('instanceSize', 'float'));
-    const offsetXY = attribute('offsetXY', 'vec2');
+    const offsetX = attribute('offsetX', 'float');
+    const offsetY = attribute('offsetY', 'float');
     const pointIx = float(attribute('pointIx', 'float'));
     const spawnTime = float(attribute('spawnTime', 'float'));
+    const parallax = float(attribute('parallax', 'float'));
+    const teff = float(attribute('teff', 'float'));
+    const pmra = float(attribute('pmra', 'float'));
+    const pmdec = float(attribute('pmdec', 'float'));
+    const rv = float(attribute('rv', 'float'));
+
+    const tileOffsetX = float(userData('tileOffsetX', 'float'));
+    const tileOffsetY = float(userData('tileOffsetY', 'float'));
+    const tileScale = float(userData('tileScale', 'float'));
+    
+    // Reconstruct global [0..1] coordinates
+    const globalX = tileOffsetX.add(offsetX.mul(tileScale));
+    const globalY = tileOffsetY.add(offsetY.mul(tileScale));
 
     const mat = new MeshBasicNodeMaterial({
       transparent: true,
@@ -130,75 +178,131 @@ export class Scatterplot {
     const isColorNaN = rawColor.equal(rawColor).not();
     const safeRawColor = select(isColorNaN, float(0.0), rawColor);
     
-    // Scale and cap the base size 
-    const isTokens = safeRawMag.greaterThan(30.0);
+    // --- SIZE LOGIC ---
+    const SEMANTIC_TOKEN_THRESHOLD = 30.0;
+    const isTokens = safeRawMag.greaterThan(SEMANTIC_TOKEN_THRESHOLD);
     const tokenSize = max(float(0.5), log2(max(safeRawMag, float(1.0))));
-    // Boost minimum size so faint dust grains can overlap at deep zoom, but CLAMP maximum size 
-    // so bright foreground stars don't explode into massive fuzzy balls that block the background.
-    const gaiaSize = clamp(float(21.0).sub(safeRawMag).div(float(8.0)), float(0.15), float(4.0));
-    const computedSize = select(isTokens, tokenSize, gaiaSize);
     
-    // Base linear scaling for Z=0 to Z=3
+    // GAIA BASELINE SIZE
+    const gaiaBaseSize = max(float(0.05), float(21.0).sub(safeRawMag).div(float(10.0)));
+    const computedGaiaSize = select(isTokens, tokenSize, gaiaBaseSize);
+    const instanceGaiaSize = mix(float(1.2), float(3.0), zoomT).mul(computedGaiaSize);
+    
+    // CHART MODE SIZE
+    const gaiaSizeClamp = clamp(float(21.0).sub(safeRawMag).div(float(8.0)), float(0.15), float(4.0));
+    const computedChartSize = select(isTokens, tokenSize, gaiaSizeClamp);
     const linearSize = mix(float(1.5), float(3.0), zoomT);
-    const linearOpacity = mix(float(0.04), float(0.12), zoomT);
-    
-    // Deep boost limits: We no longer aggressively scale size to prevent foreground stars from
-    // blowing out deep galaxies. We only slightly boost opacity to preserve additive glow.
-    const deepBoost = max(float(0.0), zoomT.sub(float(0.5)));
-    const instanceSize = linearSize.mul(computedSize);
-    const baseOpacity = clamp(linearOpacity.add(deepBoost.mul(float(0.08))), float(0.02), float(0.25));
-    
-    // The user requested a progressive brightness boost that starts at Z=5 and peaks at Z=11
-    // Z-levels 5-11 correspond to a log2 camera zoom of roughly 3.0 to 9.0
     const zoomLevel = this.currentZoomUniform;
     const ultraDeepBoost = smoothstep(float(3.0), float(9.0), zoomLevel);
-    
-    // Isolate the boost to FAINT stars (Magnitude > 16) so that deep clusters like M33 pop, 
-    // but sparse bright foreground Milky Way stars are largely unaffected.
     const faintStarIsolator = smoothstep(float(15.0), float(19.0), safeRawMag);
     const targetedDeepBoost = ultraDeepBoost.mul(faintStarIsolator);
+    const finalSizeMultiplier = float(1.0).add(targetedDeepBoost.mul(float(1.5)));
+    const instanceChartSize = linearSize.mul(computedChartSize).mul(finalSizeMultiplier);
     
-    // Massive opacity and size boost to keep deep stars visible when point density drops
-    const finalOpacityMultiplier = float(1.0).add(targetedDeepBoost.mul(float(4.0))); // Boost up to 5x opacity
-    const finalSizeMultiplier = float(1.0).add(targetedDeepBoost.mul(float(1.5))); // Boost up to 2.5x larger stars
+    const isVisible = isTokens.or(safeRawMag.lessThanEqual(this.maxMagUniform));
     
-    const isVisible = rawMag.greaterThan(0.0)
-                      .and(isTokens.or(safeRawMag.lessThanEqual(this.maxMagUniform)));
-    const boostedInstanceSize = instanceSize.mul(finalSizeMultiplier);
-    const safeSize = select(isVisible, targetPixels.mul(this.rendererWrapper.worldUnitsPerPixelUniform).mul(boostedInstanceSize), float(0.0));
+    const instanceSize = mix(instanceGaiaSize, instanceChartSize, this.modeUniform);
+    const safeSize = select(isVisible, targetPixels.mul(this.rendererWrapper.worldUnitsPerPixelUniform).mul(instanceSize), float(0.0));
     
-    // Smoothly fade in stars over 1.0 magnitude unit as they drop below the maxMagUniform threshold
+    // --- OPACITY LOGIC ---
+    // GAIA BASELINE OPACITY
+    const opacityRamp = sqrt(zoomT); 
+    const baseGaiaOpacity = mix(float(0.03), float(0.10), opacityRamp);
+    
+    // CHART MODE OPACITY
+    const linearOpacity = mix(float(0.04), float(0.12), zoomT);
+    const deepBoost = max(float(0.0), zoomT.sub(float(0.5)));
+    const baseChartOpacity = clamp(linearOpacity.add(deepBoost.mul(float(0.08))), float(0.02), float(0.25));
+    const finalOpacityMultiplier = float(1.0).add(targetedDeepBoost.mul(float(4.0)));
+    
     const magFade = clamp(this.maxMagUniform.sub(safeRawMag), float(0.0), float(1.0));
-    const finalBaseOpacity = select(isTokens, baseOpacity, baseOpacity.mul(magFade)).mul(finalOpacityMultiplier);
+    const finalBaseGaiaOpacity = select(isTokens, baseGaiaOpacity, baseGaiaOpacity.mul(magFade));
+    const finalBaseChartOpacity = select(isTokens, baseChartOpacity, baseChartOpacity.mul(magFade)).mul(finalOpacityMultiplier);
     
-    const dynamicOpacity = clamp(finalBaseOpacity, float(1.0 / 255.0), float(1.0));
+    const dynamicGaiaOpacity = clamp(finalBaseGaiaOpacity, float(1.0 / 255.0), float(1.0));
+    const dynamicChartOpacity = clamp(finalBaseChartOpacity, float(1.0 / 255.0), float(1.0));
+    const dynamicOpacity = mix(dynamicGaiaOpacity, dynamicChartOpacity, this.modeUniform);
+    
+    // --- COLOR LOGIC ---
+    const getField = (field: string) => {
+        if (field === 'x_u16') return globalX;
+        if (field === 'y_u16') return globalY;
+        if (field === 'bp_rp') return rawColor;
+        if (field === 'abs_m') return rawMag;
+        if (field === 'parallax') return parallax;
+        if (field === 'teff_gspphot') return teff;
+        if (field === 'pmra') return pmra;
+        if (field === 'pmdec') return pmdec;
+        if (field === 'radial_velocity') return rv;
+        return float(0.0);
+    };
 
+    const mapVal = (val: any, domain: [number, number] | undefined, range: [number, number] | undefined) => {
+        if (!domain || !range) return val;
+        const t = val.sub(float(domain[0])).div(float(domain[1] - domain[0]));
+        return mix(float(range[0]), float(range[1]), clamp(t, 0.0, 1.0));
+    };
+
+    // GAIA BASELINE COLOR
     const val = safeRawColor;
-
-    // GAIA bp_rp continuous scale: Domain is [-5.0, 5.0]
-    // Negative = Blue, 0 = White, Positive = Red
     const cBlue = vec3(0x11/255.0, 0x22/255.0, 0xaa/255.0);
     const cLtBlue = vec3(0x55/255.0, 0xaa/255.0, 0xdd/255.0);
     const cWhite = vec3(1.0, 1.0, 1.0);
     const cOrange = vec3(0xff/255.0, 0x99/255.0, 0x00/255.0);
     const cRed = vec3(0xcc/255.0, 0x22/255.0, 0x00/255.0);
 
-    // Smoothstep maps val across the domain
-    const mix1 = smoothstep(-5.0, -2.5, val);
-    const mix2 = smoothstep(-2.5, 0.0, val);
-    const mix3 = smoothstep(0.0, 2.5, val);
-    const mix4 = smoothstep(2.5, 5.0, val);
+    const mix1Gaia = smoothstep(-5.0, -2.5, val);
+    const mix2Gaia = smoothstep(-2.5, 0.0, val);
+    const mix3Gaia = smoothstep(0.0, 2.5, val);
+    const mix4Gaia = smoothstep(2.5, 5.0, val);
 
-    // Chain the mixes together
-    let color = mix(cBlue, cLtBlue, mix1);
-    color = mix(color, cWhite, mix2);
-    color = mix(color, cOrange, mix3);
-    const baseColor = mix(color, cRed, mix4);
+    let colorGaia = mix(cBlue, cLtBlue, mix1Gaia);
+    colorGaia = mix(colorGaia, cWhite, mix2Gaia);
+    colorGaia = mix(colorGaia, cOrange, mix3Gaia);
+    const baseGaiaColor = mix(colorGaia, cRed, mix4Gaia);
+
+    // CHART MODE COLOR
+    const colorField = currConfig.color?.field ? getField(currConfig.color.field) : rawColor;
+    const isColorNaN2 = colorField.equal(colorField).not();
+    const safeColor2 = select(isColorNaN2, float(0.0), colorField);
     
+    let baseChartColor = vec3(1.0, 1.0, 1.0);
+    if (currConfig.color?.range === 'rdbu') {
+        let cDomain = currConfig.color?.domain || [-5.0, 5.0];
+        const t = clamp(safeColor2.sub(float(cDomain[0])).div(float(cDomain[1] - cDomain[0])), 0.0, 1.0);
+        const mix1 = smoothstep(0.0, 0.25, t);
+        const mix2 = smoothstep(0.25, 0.5, t);
+        const mix3 = smoothstep(0.5, 0.75, t);
+        const mix4 = smoothstep(0.75, 1.0, t);
+        let color = mix(cBlue, cLtBlue, mix1);
+        color = mix(color, cWhite, mix2);
+        color = mix(color, cOrange, mix3);
+        baseChartColor = mix(color, cRed, mix4);
+    } else if (currConfig.color?.range === 'viridis') {
+        const c1 = vec3(0.26, 0.00, 0.32);
+        const c2 = vec3(0.19, 0.40, 0.55);
+        const c3 = vec3(0.12, 0.63, 0.53);
+        const c4 = vec3(0.99, 0.90, 0.14);
+        let cDomain = currConfig.color?.domain || [0.0, 100.0];
+        const t = clamp(safeColor2.sub(float(cDomain[0])).div(float(cDomain[1] - cDomain[0])), 0.0, 1.0);
+        const mix1 = smoothstep(0.0, 0.33, t);
+        const mix2 = smoothstep(0.33, 0.66, t);
+        const mix3 = smoothstep(0.66, 1.0, t);
+        let color = mix(c1, c2, mix1);
+        color = mix(color, c3, mix2);
+        baseChartColor = mix(color, c4, mix3);
+    }
+
+    const baseColor = mix(baseGaiaColor, baseChartColor, this.modeUniform);
+    
+    // --- ALPHA & BLENDING ---
     const threshold = float(1.0 / 255.0);
     const distanceToCenter = distance(uv(), vec2(0.5));
-    // Soft Gaussian-like falloff from center for beautiful additive blending
-    const alphaEdge = float(1.0).sub(smoothstep(float(0.0), float(0.5), distanceToCenter));
+    
+    const alphaEdgeGaia = float(1.0).sub(smoothstep(float(0.35), float(0.5), distanceToCenter));
+    const alphaEdgeChart = float(1.0).sub(smoothstep(float(0.0), float(0.5), distanceToCenter));
+    const alphaEdge = mix(alphaEdgeGaia, alphaEdgeChart, this.modeUniform);
+    
     const finalAlpha = alphaEdge.mul(dynamicOpacity);
 
     const isSubPixelOpacity = finalAlpha.lessThan(threshold);
@@ -206,7 +310,7 @@ export class Scatterplot {
     const probDiscard = randomVal.greaterThan(finalAlpha.mul(float(255.0)));
     
     // Opacity Fade-in
-    const age = time.sub(spawnTime);
+    const age = this.globalTimeUniform.sub(spawnTime);
     const fadeAlpha = smoothstep(0.0, 0.3, age);
     
     const shouldDiscard = distanceToCenter.greaterThan(0.5).or(isSubPixelOpacity.and(probDiscard));
@@ -215,78 +319,46 @@ export class Scatterplot {
     mat.colorNode = baseColor.mul(safeAlpha);
     mat.opacityNode = safeAlpha;
     
-    const tileOffsetX = userData('tileOffsetX', 'float');
-    const tileOffsetY = userData('tileOffsetY', 'float');
-    const tileScale = userData('tileScale', 'float');
+    const getMappedPos = (cfg: EncodingConfig) => {
+        const xField = cfg.x?.field ? getField(cfg.x.field) : globalX;
+        const mappedX = mapVal(xField, cfg.x?.domain, cfg.x?.range);
+        
+        const yField = cfg.y?.field ? getField(cfg.y.field) : globalY;
+        const mappedY = mapVal(yField, cfg.y?.domain, cfg.y?.range);
+        
+        let finalX = mappedX;
+        let finalY = mappedY;
+        
+        if (cfg.x?.field === 'x_u16' || cfg.x?.transform === 'literal') {
+            finalX = mappedX;
+        }
+        if (cfg.y?.field === 'y_u16' || cfg.y?.transform === 'literal') {
+            finalY = mappedY;
+        }
+        
+        if (cfg.jitter) {
+            const jRad = float(cfg.jitter.radius);
+            const jSpeed = float(cfg.jitter.speed);
+            const phase = hash(instanceIndex).mul(float(Math.PI * 2.0));
+            const tOffset = this.globalTimeUniform.mul(jSpeed).add(phase);
+            finalX = finalX.add(sin(tOffset).mul(jRad));
+            finalY = finalY.add(cos(tOffset).mul(jRad));
+        }
+        return { x: finalX, y: finalY };
+    };
+
+    const prevPos = getMappedPos(prevConfig);
+    const currPos = getMappedPos(currConfig);
     
-    // Reconstruct global [0..1] coordinates
-    const globalX = tileOffsetX.add(offsetXY.x.mul(tileScale));
-    const globalY = tileOffsetY.add(offsetXY.y.mul(tileScale));
-    
-    const mappedX = globalX.mul(float(4.0)).sub(float(2.0));
-    const mappedY = float(1.0).sub(globalY.mul(float(2.0)));
-    const offset3D = vec3(mappedX, mappedY, float(0.0));
+    const finalX = mix(prevPos.x, currPos.x, this.transitionTUniform);
+    const finalY = mix(prevPos.y, currPos.y, this.transitionTUniform);
+
+    const offset3D = vec3(finalX, finalY, float(0.0));
     mat.positionNode = select(isVisible, offset3D.add(positionLocal.mul(safeSize)), vec3(1000000.0));
 
     return mat;
   }
 
-  private createPickingMaterial() {
-    const rawMag = float(float(attribute('instanceSize', 'float')));
-    const offsetXY = attribute('offsetXY', 'vec2');
-    const pointIx = float(float(attribute('pointIx', 'float')));
-
-    const mat = new MeshBasicNodeMaterial({
-      transparent: true,
-      alphaTest: 0.001,
-      blending: THREE.NoBlending,
-      depthWrite: true,
-      depthTest: true,
-      side: THREE.DoubleSide
-    });
-
-    // Encode global sortedIndex as a 32-bit Integer packed into RGBA
-    // We add 0x01000000 so the 4th byte (Alpha) is ALWAYS >= 1. 
-    // This perfectly bypasses alphaTest=0.001 for valid pixels, but lets us output 0.0 alpha to trigger native Discard!
-    
-    // TSL native userData pulls slotIndex dynamically without material clones
-    const slotIndexNode = userData('slotIndex', 'uint');
-    const globalInstanceIndex = slotIndexNode.mul(this.rowsPerTile).add(uint(instanceIndex));
-    const fInstanceIndex = globalInstanceIndex.add(0x01000000);
-    
-    const r = float(fInstanceIndex.bitAnd(0xFF)).div(255.0);
-    const g = float(fInstanceIndex.shiftRight(8).bitAnd(0xFF)).div(255.0);
-    const b = float(fInstanceIndex.shiftRight(16).bitAnd(0xFF)).div(255.0);
-    const a = float(fInstanceIndex.shiftRight(24).bitAnd(0xFF)).div(255.0);
-    
-    mat.colorNode = vec3(r, g, b);
-    
-    const isVisible = rawMag.greaterThan(0.0)
-                      .and(rawMag.lessThanEqual(this.maxMagUniform));
-    const distanceToCenter = distance(uv(), vec2(0.5));
-    const shouldDiscard = distanceToCenter.greaterThan(0.5).or(isVisible.not());
-    mat.opacityNode = select(shouldDiscard, float(0.0), a);
-    
-    const zoomT = this.rendererWrapper.zoomTUniform;
-    const targetPixels = mix(float(0.8), float(2.0), zoomT);
-    const instanceSize = mix(float(0.6), float(2.5), zoomT).mul(rawMag);
-    const safeSize = targetPixels.mul(this.rendererWrapper.worldUnitsPerPixelUniform).mul(instanceSize);
-
-    const tileOffsetX = userData('tileOffsetX', 'float');
-    const tileOffsetY = userData('tileOffsetY', 'float');
-    const tileScale = userData('tileScale', 'float');
-    
-    // Reconstruct global [0..1] coordinates
-    const globalX = tileOffsetX.add(offsetXY.x.mul(tileScale));
-    const globalY = tileOffsetY.add(offsetXY.y.mul(tileScale));
-
-    const mappedX = globalX.mul(float(4.0)).sub(float(2.0));
-    const mappedY = float(1.0).sub(globalY.mul(float(2.0)));
-    const offset3D = vec3(mappedX, mappedY, float(0.0));
-    mat.positionNode = select(isVisible, offset3D.add(positionLocal.mul(safeSize)), vec3(1000000.0));
-
-    return mat;
-  }
 
   public calculateMaxIx(camera: THREE.OrthographicCamera): number {
     const visibleWidth = (camera.right - camera.left) / camera.zoom;
@@ -300,6 +372,7 @@ export class Scatterplot {
   private vp = new THREE.Matrix4();
 
   public updateCamera(camera: THREE.Camera) {
+    this.globalTimeUniform.value = performance.now() / 1000.0;
     this.vp.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     this.vpMatrixUniform.value.copy(this.vp);
     
@@ -355,9 +428,8 @@ export class Scatterplot {
     public updateTiles(tiles: TileData[]): boolean {
         const currentKeys = new Set(tiles.map(t => t.key));
         
-        // PCIe Throttling: Lower max updates to prevent 30MB bandwidth spikes during fast panning
-        const MAX_PROCESS_TILES = 4; 
-        let processedTiles = 0;
+        // PCIe Throttling: Use a time-based budget (e.g., 8ms) to prevent frame stuttering during rapid panning
+        const frameStart = performance.now();
         let hasPendingUpdates = false;
 
         // 1. Identify tiles that are currently on GPU but no longer active
@@ -392,12 +464,11 @@ export class Scatterplot {
       const geo = this.slotMeshes[slot].geometry as THREE.InstancedBufferGeometry;
 
       if (tile.needsUpdate) {
-        if (processedTiles >= MAX_PROCESS_TILES) {
+        if (performance.now() - frameStart > 8.0) {
              this.slotMeshes[slot].visible = geo.instanceCount > 0;
              hasPendingUpdates = true;
              continue;
         }
-        processedTiles++;
         
         // Update per-mesh uniforms for the shader
         const [zStr, txStr, tyStr] = tile.key.split('/');
@@ -409,12 +480,18 @@ export class Scatterplot {
         const numItems = Math.min(tile.numRows, this.rowsPerTile);
         geo.instanceCount = numItems;
         
-        if (tile.xyBuffer) {
-            const oxy = geo.getAttribute('offsetXY') as THREE.InstancedBufferAttribute;
-            (oxy.array as Uint16Array).set(tile.xyBuffer.subarray(0, numItems * 2));
-            oxy.clearUpdateRanges();
-            oxy.addUpdateRange(0, numItems * 2);
-            oxy.needsUpdate = true;
+        if (tile.xBuffer && tile.yBuffer) {
+            const ox = geo.getAttribute('offsetX') as THREE.InstancedBufferAttribute;
+            (ox.array as Uint16Array).set(new Uint16Array(tile.xBuffer).subarray(0, numItems));
+            ox.clearUpdateRanges();
+            ox.addUpdateRange(0, numItems);
+            ox.needsUpdate = true;
+            
+            const oy = geo.getAttribute('offsetY') as THREE.InstancedBufferAttribute;
+            (oy.array as Uint16Array).set(new Uint16Array(tile.yBuffer).subarray(0, numItems));
+            oy.clearUpdateRanges();
+            oy.addUpdateRange(0, numItems);
+            oy.needsUpdate = true;
 
             const ixBuf = tile.ixBuffer || new Float32Array(numItems);
             const ix = geo.getAttribute('pointIx') as THREE.InstancedBufferAttribute;
@@ -445,6 +522,22 @@ export class Scatterplot {
             st.clearUpdateRanges();
             st.addUpdateRange(0, numItems);
             st.needsUpdate = true;
+
+            const updateExtraBuf = (name: string, buf: Float32Array | undefined) => {
+                if (buf) {
+                    const attr = geo.getAttribute(name) as THREE.InstancedBufferAttribute;
+                    (attr.array as Float32Array).set(buf.subarray(0, numItems));
+                    attr.clearUpdateRanges();
+                    attr.addUpdateRange(0, numItems);
+                    attr.needsUpdate = true;
+                }
+            };
+            
+            updateExtraBuf('parallax', tile.parallaxBuffer);
+            updateExtraBuf('teff', tile.teffBuffer);
+            updateExtraBuf('pmra', tile.pmraBuffer);
+            updateExtraBuf('pmdec', tile.pmdecBuffer);
+            updateExtraBuf('rv', tile.rvBuffer);
         }        tile.needsUpdate = false;
       }
       
@@ -454,84 +547,4 @@ export class Scatterplot {
     return hasPendingUpdates;
   }
 
-  public updateHover(globalId: number, tooltipHtmlCallback: (html: string) => void) {
-      if (globalId < 0 || globalId >= this.maxGlobalRows) {
-        this.hoverMesh.visible = false;
-        return;
-      }
-      
-      const slotIndex = Math.floor(globalId / this.rowsPerTile);
-      const rowIndex = globalId % this.rowsPerTile;
-      const tileKey = this.slotToTileKey[slotIndex];
-      
-      if (tileKey === "") {
-        this.hoverMesh.visible = false;
-        return;
-      }
-  
-      const tile = this.slotToTileData[slotIndex];
-      if (!tile || !tile.xyBuffer || !tile.sizeBuffer) {
-          this.hoverMesh.visible = false;
-          return;
-      }
-
-      const offsetXY = new Uint16Array(tile.xyBuffer);
-      const sizeBuffer = new Float32Array(tile.sizeBuffer);
-      
-      const rawX = offsetXY[rowIndex * 2] / 65535.0;
-      const rawY = offsetXY[rowIndex * 2 + 1] / 65535.0;
-      
-      const [zStr, txStr, tyStr] = tileKey.split('/');
-      const scale = 1.0 / Math.pow(2, parseInt(zStr));
-      const tileOriginX = parseInt(txStr) * scale;
-      const tileOriginY = parseInt(tyStr) * scale;
-      
-      const globalX = tileOriginX + (rawX * scale);
-      const globalY = tileOriginY + (rawY * scale);
-      
-      const mappedX = globalX * 4.0 - 2.0;
-      const mappedY = 1.0 - rawY * 2.0;
-      
-      this.hoverMesh.position.set(mappedX, mappedY, 0.0);
-      
-      // Sync hover scale precisely with the visual shader scale
-      // Remove tile-based fading to fix density bands
-      const zoomT = Math.max(0, currentZoom / 6.0);
-      const targetPixels = 1.0 * (1.0 - zoomT) + 2.0 * zoomT;
-      const baseInstanceSize = 1.2 * (1.0 - zoomT) + 2.2 * zoomT;
-      const rawMag = sizeBuffer[rowIndex];
-      
-      let computedSize = 0;
-      if (rawMag > 30.0) {
-          computedSize = Math.max(0.5, Math.log2(Math.max(rawMag, 1.0)));
-      } else {
-          computedSize = Math.max(0.05, (21.0 - rawMag) / 10.0);
-      }
-      
-      const physicalSize = targetPixels * baseInstanceSize * computedSize * this.rendererWrapper.worldUnitsPerPixelUniform.value * 4.0;
-      this.hoverMesh.scale.set(physicalSize, physicalSize, 1.0);
-      
-      this.hoverMesh.visible = true;
-      
-      let hoverText = `Tile: ${tileKey}<br/>Row: ${rowIndex}`;
-      
-      // Lookup directly from tile data to avoid giant array allocation
-      const slot = Math.floor(globalId / this.rowsPerTile);
-      // rowIndex is already defined earlier
-      const tileData = this.slotToTileData[slot];
-      
-      let global_id = 0, model_id = 0, num_of_tokens = 0;
-      if (tileData && tileData.hoverBuffer && (rowIndex * 3 + 2) < tileData.hoverBuffer.length) {
-          global_id = tileData.hoverBuffer[rowIndex * 3 + 0];
-          model_id = tileData.hoverBuffer[rowIndex * 3 + 1];
-          num_of_tokens = tileData.hoverBuffer[rowIndex * 3 + 2];
-      }
-      
-      if (global_id !== 0 || model_id !== 0 || num_of_tokens !== 0) {
-         hoverText = `Global ID: ${global_id}<br/>Model ID: ${model_id}<br/>Tokens: ${num_of_tokens}`;
-      } else {
-         hoverText += `<br/><i>Loading semantic data...</i>`;
-      }
-      tooltipHtmlCallback(hoverText);
-  }
 }

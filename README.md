@@ -6,15 +6,13 @@ The specific goal of this sandbox is to push the boundaries of browser-based ren
 
 Because the Gaia dataset is incredibly dense and massive, it serves as the ultimate stress test for out-of-core data streaming, GPU memory management, and Additive Blending LOD (Level-Of-Detail) algorithms.
 
-This repository builds upon our previous `deepgraph-webgpu-sandbox`, but fundamentally replaces the backend. Instead of streaming thousands of individual `.feather` files from an S3 bucket, this architecture uses a hybrid **DuckDB + Rust** pipeline to pack the entire quadtree into a single, highly-optimized **PMTiles** archive containing Apache Arrow IPC chunks.
+This repository focuses purely on the **client-side WebGPU rendering**. The data generation pipeline that builds the `.arrowtiles` archives is housed in our sibling repository, `duckdb-arrowtiles`.
 
 ## 🚀 Getting Started
 
 ### Prerequisites
 - Node.js (v18+)
 - A modern browser with **WebGPU enabled** (Chrome 113+, Edge 113+, Firefox Nightly, or Safari 18+).
-- Python 3.10+ and Rust (for the data generation pipeline)
-- DuckDB with the custom `arrowtiles` extension.
 
 ### Setup
 
@@ -34,7 +32,19 @@ The application will launch on `http://localhost:5173`.
 
 ---
 
-## 🏗️ Architecture Overview
+## 📊 European Space Agency GAIA v3 Benchmarks
+
+The 2-pass IPC architecture completely bypasses FFI (Foreign Function Interface) memory leaks and maximizes CPU utilization. It is capable of processing **1.35 billion rows (~25 GB raw Parquet)** on consumer hardware (64GB RAM, 24-core CPU) in approximately **50 minutes**, yielding a tightly compressed 15.8 GB `.arrowtiles` archive optimized for WebGPU HTTP Range Requests.
+
+Below are performance and profiling snapshots taken during the WebGPU render loop stress test of the 1.35 Billion row dataset:
+
+![GAIA Benchmark 1](./assets/performance_1.png)
+![GAIA Benchmark 2](./assets/performance_2.png)
+![GAIA Benchmark 3](./assets/performance_3.png)
+
+---
+
+## 🏗️ Frontend Architecture
 
 The system operates on a multi-threaded pipeline designed to minimize CPU bottlenecks during rendering and maximize data throughput over HTTP.
 
@@ -42,44 +52,23 @@ The system operates on a multi-threaded pipeline designed to minimize CPU bottle
 graph TD
     subgraph Browser Main Thread
         TM[TileManager] -->|Calculates Frustum & LOD| PM[PMTilesClient]
-        PM -->|HTTP Range Requests| S3[(.pmtiles Archive)]
+        PM -->|HTTP Range Requests| S3[(.arrowtiles Archive)]
         S3 -->|Apache Arrow IPC Binary| PM
         PM -->|Float32Arrays| BUF[GPU Buffer Upload]
         BUF --> R[WebGPU Renderer]
         R -->|Draws InstancedMesh| C[Canvas]
     end
-    subgraph Backend ["Data Pipeline (DuckDB + Rust)"]
-        RAW[(Raw Parquet)] -->|Global Magnitude Sort| DDB[DuckDB]
-        DDB -->|Spatial Partitioning| CHUNKS[(Macro-Chunks)]
-        CHUNKS -->|Parallel Voxel Bucketing| RUST[Rust arrowtiles_bucketer]
-        RUST -->|Arrow IPC output| PACK[DuckDB Packer]
-        PACK --> S3
-    end
 ```
 
 1. **`main.ts`**: Initializes the WebGPU scene and handles the `InstancedMesh`.
 2. **`TileManager.ts`**: Handles spatial Quadtree indexing and limits HTTP connection flooding via dynamic `overfetch` tuning.
-3. **`PMTilesClient.ts`**: Replaces the old Web Worker. It issues HTTP Range Requests to the unified `.pmtiles` archive, extracts the Apache Arrow IPC binary chunks, and parses them into zero-copy `Float32Array` buffers.
-4. **`generate_pipeline.py` & `arrowtiles_bucketer`**: A hybrid Python/DuckDB/Rust pipeline that ingests raw Parquet datasets, projects them geometrically using a Hammer projection, sorts them globally by magnitude (brightness), and efficiently packs them into quadtree LOD levels using a multi-threaded Rust spatial voxel bucketer.
+3. **`PMTilesClient.ts`**: Issues HTTP Range Requests to the unified `.arrowtiles` archive. It uses a dynamic Web Worker pool (`pmtiles.worker.ts`) to offload Zstandard WebAssembly decompression (`@bokuweb/zstd-wasm`) and Apache Arrow IPC parsing, ensuring the Main UI thread remains unblocked before passing zero-copy `Float32Array` buffers to the GPU.
 
-### 📁 Repository Structure
+### 📁 Sibling Projects
 
-```text
-deepgraph-arrowtiles-sandbox/
-├── src/                          # Frontend WebGPU Application
-│   ├── core/                     # WebGPU Renderer initialization & HDR tone mapping
-│   ├── main.ts                   # Main application loop and UI telemetry
-│   ├── PMTilesClient.ts          # Range Requests, Arrow IPC parsing, LRU Cache
-│   ├── pmtiles.worker.ts         # Web Worker for non-blocking Arrow deserialization
-│   └── Scatterplot.ts            # TSL Node Material, Quadtree meshes, Zero-Copy buffers
-├── duckdb-arrowtiles/            # Rust / DuckDB Backend Pipeline 
-│   ├── src/                      # Rust source code for the Bucketer and Packer
-│   └── Cargo.toml                # Rust dependencies
-├── utils/                        # Frontend Helpers (Arrow.ts, PMTiles.ts)
-├── tests/                        # Vitest unit tests for quadtree spatial logic
-├── legacy_pipeline/              # Old Python/Parquet pipeline scripts for reference
-└── generate_pipeline.py          # Master script coordinating DuckDB & Rust data packing
-```
+This repository is strictly the frontend viewer. The heavy lifting of sorting the 1.8 billion row dataset and packing it into an `.arrowtiles` archive is done by the backend repository:
+
+- **[duckdb-arrowtiles](https://github.com/kai-erlenbusch/duckdb-arrowtiles)**: A high-performance Python and Rust IPC pipeline that utilizes DuckDB for out-of-core spatial sorting and Rayon for parallel Zstd compression.
 
 ---
 
@@ -102,12 +91,14 @@ To prevent extreme additive blowouts and preserve 60 FPS when looking at the den
 
 ## ✨ Recent Architectural Evolutions
 
-1. **PMTiles Archive vs. Feather S3:** We moved away from thousands of individual `.feather` files. By packing the Apache Arrow chunks into a single `.pmtiles` file using DuckDB, we leverage HTTP Range Requests. This reduces network overhead, avoids S3 file-count limits, and massively simplifies deployment.
-2. **Rust-Powered Pipeline:** The voxel bucketing step (Stage 2) was rewritten from Python into a parallelized Rust tool (`arrowtiles_bucketer`), solving memory constraints and accelerating processing times for the 24.5 GB raw dataset.
-3. **Arrow IPC Schema Stripping:** To minimize PMTiles metadata bloat, the Arrow IPC schema header (~1KB per tile) is stripped from every chunk by the Rust packer and embedded exactly once into the PMTiles global metadata. `PMTilesClient.ts` asynchronously decodes this schema and dynamically prepends it to chunks to preserve zero-copy WebGPU compatibility while shrinking the total archive size by ~12%.
-4. **Sub-Pixel Additive Tuning:** Base opacities have been dropped as low as `0.005` to simulate Deepscatter's extremely faint rendering logic, producing smooth, photorealistic Milky Way structure.
-5. **Corrected Galactic Projection & Orientation:** Implemented accurate Equatorial-to-Galactic coordinate transformations in the data pipeline to prevent the dense Milky Way core from being distorted or smeared across spatial chunk boundaries. Additionally, applied WebGPU inverted-Y rendering fixes to ensure the final visual projection matches standard astronomical orientations.
-6. **Zoom-Linked Dynamic Cluster Boosting:** Replaced arbitrary max-tile budgeting with a geometrically accurate mapping between the camera frustum and Quadtree Z-levels. Additionally, the WebGPU shader now selectively isolates **faint cluster stars** (Magnitude > 15) and mathematically applies an `easeOut` curve as the camera zooms into them. This allows deep structures like M33 to dynamically increase in physical size (2.5x) and opacity (5x) without blooming the bright, sparse foreground stars in the Milky Way.
+1. **`.arrowtiles` vs `.pmtiles`:** By packing the Apache Arrow chunks into a single PMTiles-compatible archive using our backend pipeline, we leverage HTTP Range Requests. This reduces network overhead, avoids S3 file-count limits, and natively supports columnar data via Arrow IPC.
+2. **True Zero-Copy Columnar Buffers:** Migrated away from manually interleaved `xyBuffer` arrays to discrete `xBuffer` and `yBuffer` attributes. This aligns directly with Arrow IPC's memory layout, entirely eliminating synchronous `.slice()` manipulation and GC thrashing on the Main UI thread.
+3. **Web Worker Memory Pooling:** Prevented severe WASM heap allocations by initializing the Web Worker thread pool with reusable `ArrayBuffer` caches for parsed outputs and Zstandard payloads.
+4. **Wasm Zstd Decompression:** We migrated from pure JS decompression (`fzstd`) to a WebAssembly-native library (`@bokuweb/zstd-wasm`). This provides massive CPU savings when streaming heavy tiles.
+5. **Arrow IPC Schema Stripping:** To minimize PMTiles metadata bloat, the Arrow IPC schema header (~1KB per tile) is stripped from every chunk by the backend. `PMTilesClient.ts` asynchronously decodes this schema from the global metadata block and dynamically prepends it to chunks via the Web Worker, preserving zero-copy compatibility while shrinking the total archive size by ~12%.
+6. **Zoom-Linked Dynamic Cluster Boosting:** Replaced arbitrary max-tile budgeting with a geometrically accurate mapping between the camera frustum and Quadtree Z-levels. Additionally, the WebGPU shader selectively isolates **faint cluster stars** and applies an `easeOut` curve as the camera zooms into them.
+7. **Streamlined TSL Render Graph:** Removed legacy/abandoned GPU picking capabilities, stripping heavy RenderTargets and `Uint32` encoded picking shaders out of the application to heavily reduce Video RAM usage and speed up frame times.
+
 ---
 
 ## ⚠️ Known Challenges & Current Limitations
@@ -115,7 +106,17 @@ To prevent extreme additive blowouts and preserve 60 FPS when looking at the den
 This is a stress test sandbox, and several major architectural challenges remain unresolved:
 
 - **GPU VRAM Spikes:** When panning rapidly, the quadtree traversal can fetch dozens of tiles simultaneously. While we've aggressively tuned `overfetch` to prevent network connection starvation, the engine dynamically creates new WebGPU `InstancedBufferAttributes` when loading these tiles, which can trigger VRAM exhaustion or command queue stalls on lower-end devices.
-- **Initial Payload Size:** The generated `gaia.pmtiles` archive is ~15.8 GB, which is optimal for Range Requests, but necessitates hosting the archive on a CDN or cloud storage bucket capable of handling sustained byte-range queries efficiently.
+- **Initial Payload Size:** The generated `gaia.arrowtiles` archive is ~15.8 GB, which is optimal for Range Requests, but necessitates hosting the archive on a CDN or cloud storage bucket capable of handling sustained byte-range queries efficiently.
+
+## 🗺️ Future Roadmap
+While the core pipeline successfully processes billion-row datasets, there are several major architectural leaps planned to transform ArrowTiles from a sandbox tool into a world-class spatial ecosystem.
+
+**Phase 1: Pipeline & Frontend Optimization**
+* Z-Level Partitioning (Zero-Wait Packing)
+* Native C++ Web Worker Integration
+
+**Phase 2: Core Enhancements**
+* Spatial Tile Bounds Metadata 
 
 ## 📚 Citing
 

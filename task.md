@@ -1,0 +1,17 @@
+- `[x]` Refactor `generate_pipeline.py`
+  - `[x]` Use `ThreadPoolExecutor` for Stage 2
+  - `[x]` Add `tqdm` progress bar for threading
+  - `[x]` Set DuckDB threads to 2 inside workers
+  - `[x]` Change output extension to `.arrowtiles`
+- `[x]` Refactor `src-rust/src/bin/bucketer.rs`
+  - `[x]` Use `u64` bit-packing for HashSet instead of tuples
+- `[x]` Refactor `src-rust/src/bin/packer.rs`
+  - `[x]` Accept schema output argument
+  - `[x]` Extract and save schema header standalone
+  - `[x]` Strip schema from PMTiles payloads
+- `[x]` Refactor Frontend
+  - `[x]` `main.ts`: Fetch `.arrowtiles.schema`
+  - `[x]` `PMTilesClient.ts`: Pass schema bytes to workers
+  - `[x]` `pmtiles.worker.ts`: Concatenate schema with PMTiles payloadrsing
+- `[ ]` Verification
+  - `[ ]` Instruct user to run the pipeline
