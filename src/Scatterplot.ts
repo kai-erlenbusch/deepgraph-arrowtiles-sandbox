@@ -1,5 +1,5 @@
-// @ts-nocheck
 import * as THREE from 'three';
+import { writeToDeviceQueue } from './WebGPUAdapter';
 import { MeshBasicNodeMaterial, StorageInstancedBufferAttribute } from 'three/webgpu';
 // @ts-ignore - TSL types are highly experimental and incomplete
 import { 
@@ -156,6 +156,93 @@ export class Scatterplot {
       requestAnimationFrame(animate);
   }
 
+  private mapVal(val: any, domain: [number, number] | undefined, range: [number, number] | undefined) {
+      if (!domain || !range) return val;
+      const t = val.sub(float(domain[0])).div(float(domain[1] - domain[0]));
+      return mix(float(range[0]), float(range[1]), clamp(t, 0.0, 1.0));
+  }
+
+  private getMappedPos(cfg: EncodingConfig, globalX: any, globalY: any, getField: (f: string) => any) {
+      const xField = cfg.x?.field ? getField(cfg.x.field) : globalX;
+      const mappedX = this.mapVal(xField, cfg.x?.domain, cfg.x?.range);
+      
+      const yField = cfg.y?.field ? getField(cfg.y.field) : globalY;
+      const mappedY = this.mapVal(yField, cfg.y?.domain, cfg.y?.range);
+      
+      let finalX = mappedX;
+      let finalY = mappedY;
+      
+      if (cfg.x?.field === 'x_u16' || cfg.x?.transform === 'literal') {
+          finalX = mappedX;
+      }
+      if (cfg.y?.field === 'y_u16' || cfg.y?.transform === 'literal') {
+          finalY = mappedY;
+      }
+      
+      if (cfg.jitter) {
+          const jRad = float(cfg.jitter.radius);
+          const jSpeed = float(cfg.jitter.speed);
+          const phase = hash(instanceIndex).mul(float(Math.PI * 2.0));
+          const tOffset = this.globalTimeUniform.mul(jSpeed).add(phase);
+          finalX = finalX.add(sin(tOffset).mul(jRad));
+          finalY = finalY.add(cos(tOffset).mul(jRad));
+      }
+      return { x: finalX, y: finalY };
+  }
+
+  private buildColorNode(currConfig: EncodingConfig, getField: (f: string) => any, isGaiaMode: any) {
+      const colorField = currConfig.color?.field ? getField(currConfig.color.field) : float(0.0);
+      const isColorNaN = colorField.equal(colorField).not();
+      const safeColor = select(isColorNaN, float(0.0), colorField);
+
+      let baseChartColor = vec3(1.0, 1.0, 1.0);
+      if (currConfig.color?.range === 'rdbu') {
+          const cBlue = vec3(0x11/255.0, 0x22/255.0, 0xaa/255.0);
+          const cLtBlue = vec3(0x55/255.0, 0xaa/255.0, 0xdd/255.0);
+          const cWhite = vec3(1.0, 1.0, 1.0);
+          const cOrange = vec3(0xff/255.0, 0x99/255.0, 0x00/255.0);
+          const cRed = vec3(0xcc/255.0, 0x22/255.0, 0x00/255.0);
+          
+          let cDomain = currConfig.color?.domain || [-5.0, 5.0];
+          const t = clamp(safeColor.sub(float(cDomain[0])).div(float(cDomain[1] - cDomain[0])), 0.0, 1.0);
+          const mix1 = smoothstep(0.0, 0.25, t);
+          const mix2 = smoothstep(0.25, 0.5, t);
+          const mix3 = smoothstep(0.5, 0.75, t);
+          const mix4 = smoothstep(0.75, 1.0, t);
+          let color = mix(cBlue, cLtBlue, mix1);
+          color = mix(color, cWhite, mix2);
+          color = mix(color, cOrange, mix3);
+          baseChartColor = mix(color, cRed, mix4);
+      } else if (currConfig.color?.range === 'viridis') {
+          const c1 = vec3(0.26, 0.00, 0.32);
+          const c2 = vec3(0.19, 0.40, 0.55);
+          const c3 = vec3(0.12, 0.63, 0.53);
+          const c4 = vec3(0.99, 0.90, 0.14);
+          let cDomain = currConfig.color?.domain || [0.0, 100.0];
+          const t = clamp(safeColor.sub(float(cDomain[0])).div(float(cDomain[1] - cDomain[0])), 0.0, 1.0);
+          const mix1 = smoothstep(0.0, 0.33, t);
+          const mix2 = smoothstep(0.33, 0.66, t);
+          const mix3 = smoothstep(0.66, 1.0, t);
+          let color = mix(c1, c2, mix1);
+          color = mix(color, c3, mix2);
+          baseChartColor = mix(color, c4, mix3);
+      }
+      
+      const rawColorGaia = getField('bp_rp');
+      const isColorNaNGaia = rawColorGaia.equal(rawColorGaia).not();
+      const safeColorGaia = select(isColorNaNGaia, float(0.0), rawColorGaia);
+      const mix1G = smoothstep(-5.0, -2.5, safeColorGaia);
+      const mix2G = smoothstep(-2.5, 0.0, safeColorGaia);
+      const mix3G = smoothstep(0.0, 2.5, safeColorGaia);
+      const mix4G = smoothstep(2.5, 5.0, safeColorGaia);
+      let colorG = mix(vec3(0x11/255.0, 0x22/255.0, 0xaa/255.0), vec3(0x55/255.0, 0xaa/255.0, 0xdd/255.0), mix1G);
+      colorG = mix(colorG, vec3(1.0, 1.0, 1.0), mix2G);
+      colorG = mix(colorG, vec3(0xff/255.0, 0x99/255.0, 0x00/255.0), mix3G);
+      const baseGaiaColor = mix(colorG, vec3(0xcc/255.0, 0x22/255.0, 0x00/255.0), mix4G);
+      
+      return select(isGaiaMode, baseGaiaColor, baseChartColor);
+  }
+
   private createMainMaterial(prevConfig: EncodingConfig = this.currentConfig, currConfig: EncodingConfig = this.currentConfig) {
     const offsetX = attribute('x_u16', 'float');
     const offsetY = attribute('y_u16', 'float');
@@ -175,42 +262,8 @@ export class Scatterplot {
         return float(attribute(field, 'float'));
     };
 
-    const mapVal = (val: any, domain: [number, number] | undefined, range: [number, number] | undefined) => {
-        if (!domain || !range) return val;
-        const t = val.sub(float(domain[0])).div(float(domain[1] - domain[0]));
-        return mix(float(range[0]), float(range[1]), clamp(t, 0.0, 1.0));
-    };
-
-    const getMappedPos = (cfg: EncodingConfig) => {
-        const xField = cfg.x?.field ? getField(cfg.x.field) : globalX;
-        const mappedX = mapVal(xField, cfg.x?.domain, cfg.x?.range);
-        
-        const yField = cfg.y?.field ? getField(cfg.y.field) : globalY;
-        const mappedY = mapVal(yField, cfg.y?.domain, cfg.y?.range);
-        
-        let finalX = mappedX;
-        let finalY = mappedY;
-        
-        if (cfg.x?.field === 'x_u16' || cfg.x?.transform === 'literal') {
-            finalX = mappedX;
-        }
-        if (cfg.y?.field === 'y_u16' || cfg.y?.transform === 'literal') {
-            finalY = mappedY;
-        }
-        
-        if (cfg.jitter) {
-            const jRad = float(cfg.jitter.radius);
-            const jSpeed = float(cfg.jitter.speed);
-            const phase = hash(instanceIndex).mul(float(Math.PI * 2.0));
-            const tOffset = this.globalTimeUniform.mul(jSpeed).add(phase);
-            finalX = finalX.add(sin(tOffset).mul(jRad));
-            finalY = finalY.add(cos(tOffset).mul(jRad));
-        }
-        return { x: finalX, y: finalY };
-    };
-
-    const prevPos = getMappedPos(prevConfig);
-    const currPos = getMappedPos(currConfig);
+    const prevPos = this.getMappedPos(prevConfig, globalX, globalY, getField);
+    const currPos = this.getMappedPos(currConfig, globalX, globalY, getField);
     
     const finalX = mix(prevPos.x, currPos.x, this.transitionTUniform);
     const finalY = mix(prevPos.y, currPos.y, this.transitionTUniform);
@@ -219,7 +272,7 @@ export class Scatterplot {
 
     // Determine Size
     const sizeField = currConfig.size?.field ? getField(currConfig.size.field) : float(1.0);
-    const mappedSize = mapVal(sizeField, currConfig.size?.domain, currConfig.size?.range || [1.0, 1.0]);
+    const mappedSize = this.mapVal(sizeField, currConfig.size?.domain, currConfig.size?.range || [1.0, 1.0]);
     
     const zoomT = this.rendererWrapper.zoomTUniform;
     const targetPixels = mix(float(1.0), float(2.0), zoomT);
@@ -241,59 +294,7 @@ export class Scatterplot {
     const isGaiaMode = this.modeUniform.lessThan(0.5);
     const safeSize = select(isGaiaMode, safeSizeGaia, targetPixels.mul(this.rendererWrapper.worldUnitsPerPixelUniform).mul(mappedSize));
 
-    // Determine Color (Chart Mode)
-    const colorField = currConfig.color?.field ? getField(currConfig.color.field) : float(0.0);
-    const isColorNaN = colorField.equal(colorField).not();
-    const safeColor = select(isColorNaN, float(0.0), colorField);
-
-    let baseChartColor = vec3(1.0, 1.0, 1.0);
-    if (currConfig.color?.range === 'rdbu') {
-        const cBlue = vec3(0x11/255.0, 0x22/255.0, 0xaa/255.0);
-        const cLtBlue = vec3(0x55/255.0, 0xaa/255.0, 0xdd/255.0);
-        const cWhite = vec3(1.0, 1.0, 1.0);
-        const cOrange = vec3(0xff/255.0, 0x99/255.0, 0x00/255.0);
-        const cRed = vec3(0xcc/255.0, 0x22/255.0, 0x00/255.0);
-        
-        let cDomain = currConfig.color?.domain || [-5.0, 5.0];
-        const t = clamp(safeColor.sub(float(cDomain[0])).div(float(cDomain[1] - cDomain[0])), 0.0, 1.0);
-        const mix1 = smoothstep(0.0, 0.25, t);
-        const mix2 = smoothstep(0.25, 0.5, t);
-        const mix3 = smoothstep(0.5, 0.75, t);
-        const mix4 = smoothstep(0.75, 1.0, t);
-        let color = mix(cBlue, cLtBlue, mix1);
-        color = mix(color, cWhite, mix2);
-        color = mix(color, cOrange, mix3);
-        baseChartColor = mix(color, cRed, mix4);
-    } else if (currConfig.color?.range === 'viridis') {
-        const c1 = vec3(0.26, 0.00, 0.32);
-        const c2 = vec3(0.19, 0.40, 0.55);
-        const c3 = vec3(0.12, 0.63, 0.53);
-        const c4 = vec3(0.99, 0.90, 0.14);
-        let cDomain = currConfig.color?.domain || [0.0, 100.0];
-        const t = clamp(safeColor.sub(float(cDomain[0])).div(float(cDomain[1] - cDomain[0])), 0.0, 1.0);
-        const mix1 = smoothstep(0.0, 0.33, t);
-        const mix2 = smoothstep(0.33, 0.66, t);
-        const mix3 = smoothstep(0.66, 1.0, t);
-        let color = mix(c1, c2, mix1);
-        color = mix(color, c3, mix2);
-        baseChartColor = mix(color, c4, mix3);
-    }
-    
-    // Determine Color (Gaia Baseline)
-    const rawColorGaia = getField('bp_rp');
-    const isColorNaNGaia = rawColorGaia.equal(rawColorGaia).not();
-    const safeColorGaia = select(isColorNaNGaia, float(0.0), rawColorGaia);
-    const mix1G = smoothstep(-5.0, -2.5, safeColorGaia);
-    const mix2G = smoothstep(-2.5, 0.0, safeColorGaia);
-    const mix3G = smoothstep(0.0, 2.5, safeColorGaia);
-    const mix4G = smoothstep(2.5, 5.0, safeColorGaia);
-    let colorG = mix(vec3(0x11/255.0, 0x22/255.0, 0xaa/255.0), vec3(0x55/255.0, 0xaa/255.0, 0xdd/255.0), mix1G);
-    colorG = mix(colorG, vec3(1.0, 1.0, 1.0), mix2G);
-    colorG = mix(colorG, vec3(0xff/255.0, 0x99/255.0, 0x00/255.0), mix3G);
-    const baseGaiaColor = mix(colorG, vec3(0xcc/255.0, 0x22/255.0, 0x00/255.0), mix4G);
-    
-    // Final Base Color
-    const finalBaseColor = select(isGaiaMode, baseGaiaColor, baseChartColor);
+    const finalBaseColor = this.buildColorNode(currConfig, getField, isGaiaMode);
     
     // Opacity
     const opacityRamp = sqrt(zoomT); 
@@ -464,21 +465,17 @@ export class Scatterplot {
         console.log(`Tile ${tile.key} | numRows: ${tile.numRows} | numItems: ${numItems}`);
         geo.instanceCount = numItems;
         
-        const backend = (this.rendererWrapper.renderer as any).backend;
-        const webgpuDevice = backend.device;
-        
         const writeToGPU = (attrName: string, buffer: ArrayBuffer | undefined) => {
             if (!buffer) return;
             const attr = geo.getAttribute(attrName) as THREE.InstancedBufferAttribute;
             if (!attr) return; // Prevent crashes if attribute isn't allocated yet
-            const backendAttr = backend.get(attr);
             
-            if (backendAttr && backendAttr.buffer) {
-                // Fast Path: Write zero-copy payload directly to the VRAM hardware queue
-                webgpuDevice.queue.writeBuffer(backendAttr.buffer, 0, buffer, 0, numItems * 4);
-            } else {
+            const success = writeToDeviceQueue(this.rendererWrapper.renderer, attr, buffer);
+            
+            if (!success) {
                 // Slow Path Fallback: Used only on the very first frame before Three.js allocates the GPU buffer
-                (attr.array as Float32Array).set(new Float32Array(buffer).subarray(0, numItems));
+                // new Float32Array(buffer) creates a zero-copy view, so this minimizes garbage collection overhead
+                (attr.array as Float32Array).set(new Float32Array(buffer, 0, numItems));
                 attr.needsUpdate = true;
                 attr.clearUpdateRanges();
                 attr.addUpdateRange(0, numItems);

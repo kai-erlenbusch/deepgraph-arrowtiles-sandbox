@@ -28,10 +28,32 @@ export class PMTilesClient {
     private lastSeenTimestamp = new Map<string, number>();
     private maxCacheSize: number;
     private queue = new PQueue({ concurrency: 6 });
-    private workers: Worker[] = [];
-    private workerIndex = 0;
+    private allWorkers: Worker[] = [];
+    private idleWorkers: Worker[] = [];
+    private pendingTasks: { payload: any, transfer: any[], abortSignal?: AbortSignal }[] = [];
     private abortControllers = new Map<string, AbortController>();
     private resolvers = new Map<string, {resolve: Function, reject: Function, t0: number, tNetEnd: number, signal?: AbortSignal, onAbort?: () => void}>();
+    private decompressResolvers = new Map<string, {resolve: Function, reject: Function}>();
+
+    private dispatchToWorker(payload: any, transfer: any[], abortSignal?: AbortSignal) {
+        if (abortSignal?.aborted) return;
+        const worker = this.idleWorkers.shift();
+        if (worker) {
+            worker.postMessage(payload, transfer);
+        } else {
+            this.pendingTasks.push({ payload, transfer, abortSignal });
+        }
+    }
+
+    private checkPendingTasks(worker: Worker) {
+        while (this.pendingTasks.length > 0) {
+            const task = this.pendingTasks.shift()!;
+            if (task.abortSignal?.aborted) continue;
+            worker.postMessage(task.payload, task.transfer);
+            return;
+        }
+        this.idleWorkers.push(worker);
+    }
     private bufferPool: { 
         columns: Map<string, ArrayBuffer[]>,
         rawPayload: ArrayBuffer[]
@@ -64,14 +86,15 @@ export class PMTilesClient {
         const numWorkers = navigator.hardwareConcurrency ? Math.max(2, navigator.hardwareConcurrency) : 8;
         for (let i = 0; i < numWorkers; i++) {
             const worker = new ArrowWorker();
-            worker.onmessage = (e) => this.handleWorkerMessage(e);
+            worker.onmessage = (e) => this.handleWorkerMessage(e, worker);
             
             if (schemaBuffer) {
                 const schemaCopy = schemaBuffer.slice();
                 worker.postMessage({ action: 'init_schema', schemaBuffer: schemaCopy }, [schemaCopy.buffer]);
             }
             
-            this.workers.push(worker);
+            this.allWorkers.push(worker);
+            this.idleWorkers.push(worker);
         }
 
         const customDecompress = async (buf: ArrayBuffer, compression: Compression): Promise<ArrayBuffer> => {
@@ -85,17 +108,9 @@ export class PMTilesClient {
             if (compression === 4) { // Zstd is 4
                 const copy = buf.slice(0);
                 return new Promise((resolve, reject) => {
-                    const worker = this.workers[this.workerIndex++ % this.workers.length];
                     const id = `decomp_${Math.random()}`;
-                    const listener = (e: MessageEvent) => {
-                        if (e.data.action === 'decompress' && e.data.id === id) {
-                            worker.removeEventListener('message', listener);
-                            if (e.data.error) reject(new Error(e.data.error));
-                            else resolve(e.data.buffer);
-                        }
-                    };
-                    worker.addEventListener('message', listener);
-                    worker.postMessage({ action: 'decompress', id, buffer: copy }, [copy]);
+                    this.decompressResolvers.set(id, { resolve, reject });
+                    this.dispatchToWorker({ action: 'decompress', id, buffer: copy }, [copy]);
                 });
             }
             throw new Error(`Unsupported compression: ${compression}`);
@@ -107,9 +122,18 @@ export class PMTilesClient {
         }
     }
 
-    private handleWorkerMessage(e: MessageEvent) {
+    private handleWorkerMessage(e: MessageEvent, worker: Worker) {
         const data = e.data;
-        if (data.action === 'decompress') return; // Handled by inline listener
+        if (data.action === 'decompress') {
+            const resolver = this.decompressResolvers.get(data.id);
+            if (resolver) {
+                this.decompressResolvers.delete(data.id);
+                if (data.error) resolver.reject(new Error(data.error));
+                else resolver.resolve(data.buffer);
+            }
+            this.checkPendingTasks(worker);
+            return;
+        }
         
         if (data.error) {
              console.error("Worker error:", data.error);
@@ -173,7 +197,15 @@ export class PMTilesClient {
                     }
                 }
             }
+            if (data.rawPayloads) {
+                for (const rawBuf of data.rawPayloads) {
+                    if (rawBuf && this.bufferPool.rawPayload.length < MAX_POOL_SIZE) {
+                        this.bufferPool.rawPayload.push(rawBuf);
+                    }
+                }
+            }
         }
+        this.checkPendingTasks(worker);
     }
 
 
@@ -212,10 +244,9 @@ export class PMTilesClient {
 
         this.currentlyVisibleIds.clear();
 
-        // Additive Quadtree: We must fetch all parent tiles from root (Z=0) up to currentZ
-        // Automatic Budgeting: We drill as deep as possible for maximum density, 
-        // as long as the LOD layer does not require more than 256 tiles on screen.
-        let plannedTiles = 0;
+        // 1. Gather all potentially visible tiles across all LOD levels
+        const candidateTiles: { cz: number, x: number, y: number, key: string, score: number }[] = [];
+        
         for (let cz = 0; cz <= z; cz++) {
             const numTiles = 1 << cz;
             const width = (this.rootBounds.maxX - this.rootBounds.minX) / numTiles;
@@ -226,33 +257,40 @@ export class PMTilesClient {
             const startY = Math.max(0, Math.floor((this.rootBounds.maxY - worldFrustum.maxY) / height));
             const endY = Math.min(numTiles - 1, Math.floor((this.rootBounds.maxY - worldFrustum.minY) / height));
 
-            const countX = endX - startX + 1;
-            const countY = endY - startY + 1;
-            const tilesInLOD = countX * countY;
-            
-            // Budget limits: Don't overflow the LRU cache.
-            if (plannedTiles + tilesInLOD > this.maxCacheSize - 10) {
-                break;
-            }
-            plannedTiles += tilesInLOD;
-            this.currentMaxZ = cz;
+            const centerX = (startX + endX) / 2.0;
+            const centerY = (startY + endY) / 2.0;
 
             for (let x = startX; x <= endX; x++) {
                 for (let y = startY; y <= endY; y++) {
                     const key = `${cz}/${x}/${y}`;
-                    this.currentlyVisibleIds.add(key);
-                    this.lastSeenTimestamp.set(key, performance.now());
-                    
-                    if (!this.activeTiles.has(key) && !this.loadingTiles.has(key)) {
-                        this.loadingTiles.add(key);
-                        // Priority based on distance to camera center! (LOD priority)
-                        const centerX = (startX + endX) / 2.0;
-                        const centerY = (startY + endY) / 2.0;
-                        const dist = Math.sqrt(Math.pow(x - centerX, 2) + Math.pow(y - centerY, 2));
-                        const priority = 1000 - (cz * 100) - dist; // Lower Z and closer to center loads first
-                        this.queue.add(() => this.loadTile(cz, x, y, key), { priority }).catch(() => {});
-                    }
+                    // Score = DistanceToCenter + (Z_Level * DepthPenalty)
+                    // Smaller score = higher priority
+                    const dist = Math.sqrt(Math.pow(x - centerX, 2) + Math.pow(y - centerY, 2));
+                    const score = dist + (cz * 0.5); 
+                    candidateTiles.push({ cz, x, y, key, score });
                 }
+            }
+        }
+
+        // 2. Sort candidates by score ascending (lowest score = highest priority)
+        candidateTiles.sort((a, b) => a.score - b.score);
+
+        // 3. Take the top N tiles up to our budget
+        const budget = this.maxCacheSize - 10;
+        const selectedTiles = candidateTiles.slice(0, budget);
+        this.currentMaxZ = z;
+
+        // 4. Dispatch the selected tiles
+        for (let i = 0; i < selectedTiles.length; i++) {
+            const { cz, x, y, key } = selectedTiles[i];
+            this.currentlyVisibleIds.add(key);
+            this.lastSeenTimestamp.set(key, performance.now());
+            
+            if (!this.activeTiles.has(key) && !this.loadingTiles.has(key)) {
+                this.loadingTiles.add(key);
+                // Inverse priority for p-queue (higher number = higher priority)
+                const queuePriority = budget - i; 
+                this.queue.add(() => this.loadTile(cz, x, y, key), { priority: queuePriority }).catch(() => {});
             }
         }
 
@@ -381,14 +419,14 @@ export class PMTilesClient {
                 transferables.push(pooledColumns[col]);
             }
 
-            const w = this.workers[this.workerIndex++ % this.workers.length];
-            w.postMessage({ 
+            const payload = { 
                 action: 'decode', 
                 key, 
                 buffers: copies,
                 requestedColumns: this.requestedColumns,
                 pooledColumns: pooledColumns
-            }, { transfer: transferables } as any);
+            };
+            this.dispatchToWorker(payload, transferables, signal);
         });
     }
 
