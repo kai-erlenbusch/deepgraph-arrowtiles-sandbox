@@ -8,6 +8,12 @@ However, the architecture has evolved into a **Massive Declarative Scatter Plot 
 
 This repository focuses purely on the **client-side WebGPU rendering**. The data generation pipeline that builds the `.arrowtiles` archives is housed in our sibling repository, `duckdb-arrowtiles`.
 
+<div align="center">
+  <img src="assets/performance_1.png" width="30%" />
+  <img src="assets/performance_2.png" width="30%" />
+  <img src="assets/performance_3.png" width="30%" />
+</div>
+
 ## 🛠️ Getting Started
 
 ### Prerequisites
