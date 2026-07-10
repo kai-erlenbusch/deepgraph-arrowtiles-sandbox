@@ -1,13 +1,7 @@
 import * as THREE from 'three';
 import GUI from 'lil-gui';
 import { PMTiles } from 'pmtiles';
-// Globally swallow AbortErrors that leak from pmtiles due to internal unhandled promise chaining
-window.addEventListener('unhandledrejection', (event) => {
-    if (event.reason && event.reason.name === 'AbortError') {
-        event.preventDefault();
-    }
-});
-
+// Global AbortError swallowing removed in favor of localized catches in PMTilesClient.ts
 let _cameraHash = "";
 import { MeshBasicNodeMaterial } from 'three/webgpu';
 import { 
@@ -19,7 +13,7 @@ import { Renderer } from './core/Renderer';
 import { PMTilesClient } from './PMTilesClient';
 import type { BoundingBox, TileData } from './PMTilesClient';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-const TILE_SERVER_URL = `/gaia.arrowtiles`;
+const TILE_SERVER_URL = `/gaia_07_09_2026.arrowtiles`;
 
 
 import { Scatterplot } from './Scatterplot';
@@ -47,7 +41,7 @@ async function init() {
   const device = (rendererWrapper.renderer as any).backend?.device;
   if (device) {
       device.addEventListener('uncapturederror', (event: any) => {
-          uiText.innerHTML = `<span style="color:red;font-weight:bold;">❌ WebGPU VRAM Crash: ${event.error.message}</span>`;
+          uiText.innerHTML = `<span style="color:red;font-weight:bold;">?O WebGPU VRAM Crash: ${event.error.message}</span>`;
           console.error("WebGPU uncapturederror:", event.error);
       });
   }
@@ -65,24 +59,44 @@ async function init() {
       colorField: 'bp_rp',
       colorScale: 'viridis',
       xField: 'x_u16',
-      yField: 'y_u16'
+      yField: 'y_u16',
+      sizeField: 'abs_m'
+  };
+
+  const getDomainForField = (field: string): [number, number] => {
+      if (field === 'bp_rp') return [-0.5, 2.5];
+      if (field === 'abs_m') return [-5.0, 20.0];
+      if (field === 'x_u16' || field === 'y_u16') return [0.0, 1.0];
+      if (field === 'parallax') return [-2.0, 5.0];
+      if (field === 'pmra' || field === 'pmdec') return [-10.0, 10.0];
+      return [0.0, 100.0];
+  };
+
+  const getSizeDomainForField = (field: string): [number, number] => {
+      if (field === 'abs_m' || field === 'magnitude') return [20.0, 0.0]; // Dimmer stars = smaller size!
+      return getDomainForField(field);
   };
 
   const updateConfig = () => {
-      scatterplot.modeUniform.value = state.mode === 'Chart Mode' ? 1.0 : 0.0;
-      scatterplot.updateEncoding({
+      scatterplot.modeUniform.value = state.mode === 'Gaia Baseline' ? 0.0 : 1.0;
+      const activeCols = scatterplot.updateEncoding({
           x: { field: state.xField, transform: 'linear', domain: [0, 1], range: [-2, 2] },
           y: { field: state.yField, transform: 'linear', domain: [0, 1], range: [1, -1] },
-          color: { field: state.colorField, range: state.colorScale as any, domain: [-0.5, 2.5] }
+          color: { field: state.colorField, range: state.colorScale as any, domain: getDomainForField(state.colorField) },
+          size: { field: state.sizeField, domain: getSizeDomainForField(state.sizeField), range: [0.5, 3.0] }
       });
+      // Important: Tell TileManager which columns to extract!
+      (window as any).tileManagerInstance?.setRequestedColumns(activeCols);
   };
-
-  gui.add(state, 'mode', ['Gaia Baseline', 'Chart Mode']).name('Mode').onChange(updateConfig);
   
+  const modeFolder = gui.addFolder('Visualization Mode');
+  modeFolder.add(state, 'mode', ['Gaia Baseline', 'Chart Mode']).onChange(updateConfig);
+
   const chartFolder = gui.addFolder('Chart Mode Settings');
-  const fields = ['x_u16', 'y_u16', 'bp_rp', 'abs_m', 'parallax', 'teff_gspphot', 'pmra', 'pmdec', 'radial_velocity'];
+  const fields = ['x_u16', 'y_u16', 'bp_rp', 'abs_m', 'parallax', 'pmra', 'pmdec', 'radial_velocity', 'teff_gspphot']; // Gaia fields
   chartFolder.add(state, 'colorField', fields).name('Color By').onChange(updateConfig);
   chartFolder.add(state, 'colorScale', ['viridis', 'rdbu']).name('Color Scale').onChange(updateConfig);
+  chartFolder.add(state, 'sizeField', fields).name('Size By').onChange(updateConfig);
   chartFolder.add(state, 'xField', fields).name('X Axis').onChange(updateConfig);
   chartFolder.add(state, 'yField', fields).name('Y Axis').onChange(updateConfig);
 
@@ -105,6 +119,9 @@ async function init() {
 
   const tileManager = new PMTilesClient(TILE_SERVER_URL, [], rootBounds, 250, schemaBuffer);
   window.tileManagerInstance = tileManager;
+  
+  // Apply initial generic config so Scatterplot and Worker extract the right columns
+  updateConfig();
   
   uiText.innerHTML = `WebGPU is supported!<br/>Streaming Quadtree Tiles...`;
 

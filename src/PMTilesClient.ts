@@ -11,16 +11,7 @@ export interface BoundingBox {
 
 export interface TileData {
     key: string; // "z/x/y"
-    xBuffer?: ArrayBuffer;
-    yBuffer?: ArrayBuffer;
-    colorBuffer?: ArrayBuffer;
-    sizeBuffer?: ArrayBuffer;
-    ixBuffer?: ArrayBuffer;
-    parallaxBuffer?: ArrayBuffer;
-    teffBuffer?: ArrayBuffer;
-    pmraBuffer?: ArrayBuffer;
-    pmdecBuffer?: ArrayBuffer;
-    rvBuffer?: ArrayBuffer;
+    columns: Record<string, ArrayBuffer>;
     numRows: number;
     needsUpdate?: boolean;
 }
@@ -42,9 +33,23 @@ export class PMTilesClient {
     private abortControllers = new Map<string, AbortController>();
     private resolvers = new Map<string, {resolve: Function, reject: Function, t0: number, tNetEnd: number, signal?: AbortSignal, onAbort?: () => void}>();
     private bufferPool: { 
-        x: ArrayBuffer[], y: ArrayBuffer[], color: ArrayBuffer[], size: ArrayBuffer[], ix: ArrayBuffer[],
-        parallax: ArrayBuffer[], teff: ArrayBuffer[], pmra: ArrayBuffer[], pmdec: ArrayBuffer[], rv: ArrayBuffer[] 
-    } = { x: [], y: [], color: [], size: [], ix: [], parallax: [], teff: [], pmra: [], pmdec: [], rv: [] };
+        columns: Map<string, ArrayBuffer[]>,
+        rawPayload: ArrayBuffer[]
+    } = { columns: new Map(), rawPayload: [] };
+    
+    private requestedColumns: string[] = ['x_u16', 'y_u16'];
+
+    public setRequestedColumns(cols: string[]) {
+        this.requestedColumns = cols;
+        this.activeTiles.clear();
+        this.cacheChanged = true;
+        this.queue.clear();
+        this.loadingTiles.clear();
+        for (const abort of this.abortControllers.values()) {
+            abort.abort();
+        }
+        this.abortControllers.clear();
+    }
 
     public fetchTelemetry = { net: [] as number[], worker: [] as number[] };
 
@@ -109,7 +114,7 @@ export class PMTilesClient {
         if (data.error) {
              console.error("Worker error:", data.error);
         }
-        if (!data.xBuffer || !data.yBuffer) {
+        if (!data.columns || !data.columns['x_u16'] || !data.columns['y_u16']) {
              console.log("Worker returned missing X or Y buffer for key", data.key);
              const resolver = this.resolvers.get(data.key);
              if (resolver) {
@@ -131,20 +136,18 @@ export class PMTilesClient {
             } else {
                 const tileData: TileData = {
                     key: data.key,
-                    xBuffer: data.xBuffer,
-                    yBuffer: data.yBuffer,
-                    colorBuffer: data.colorBuffer,
-                    sizeBuffer: data.sizeBuffer,
-                    ixBuffer: data.ixBuffer,
-                    parallaxBuffer: data.parallaxBuffer,
-                    teffBuffer: data.teffBuffer,
-                    pmraBuffer: data.pmraBuffer,
-                    pmdecBuffer: data.pmdecBuffer,
-                    rvBuffer: data.rvBuffer,
+                    columns: data.columns,
                     numRows: numRows,
                     needsUpdate: true
                 };
                 req.resolve(tileData);
+                
+                // Push the raw payload buffer(s) back into the pool for recycling
+                if (data.rawPayloads) {
+                    for (const rawBuf of data.rawPayloads) {
+                        if (rawBuf) this.bufferPool.rawPayload.push(rawBuf);
+                    }
+                }
                 
                 const tWorkerEnd = performance.now();
                 this.fetchTelemetry.net.push(req.tNetEnd - req.t0);
@@ -158,17 +161,17 @@ export class PMTilesClient {
             // Worker returned data but the request was already aborted/deleted.
             // Put buffers back into the pool to prevent memory leaks!
             const MAX_POOL_SIZE = 50;
-            if (this.bufferPool.x.length < MAX_POOL_SIZE) {
-                if (data.xBuffer) this.bufferPool.x.push(data.xBuffer);
-                if (data.yBuffer) this.bufferPool.y.push(data.yBuffer);
-                if (data.colorBuffer) this.bufferPool.color.push(data.colorBuffer);
-                if (data.sizeBuffer) this.bufferPool.size.push(data.sizeBuffer);
-                if (data.ixBuffer) this.bufferPool.ix.push(data.ixBuffer);
-                if (data.parallaxBuffer) this.bufferPool.parallax.push(data.parallaxBuffer);
-                if (data.teffBuffer) this.bufferPool.teff.push(data.teffBuffer);
-                if (data.pmraBuffer) this.bufferPool.pmra.push(data.pmraBuffer);
-                if (data.pmdecBuffer) this.bufferPool.pmdec.push(data.pmdecBuffer);
-                if (data.rvBuffer) this.bufferPool.rv.push(data.rvBuffer);
+            if (data.columns) {
+                for (const colName of Object.keys(data.columns)) {
+                    let colPool = this.bufferPool.columns.get(colName);
+                    if (!colPool) {
+                        colPool = [];
+                        this.bufferPool.columns.set(colName, colPool);
+                    }
+                    if (colPool.length < MAX_POOL_SIZE) {
+                        colPool.push(data.columns[colName]);
+                    }
+                }
             }
         }
     }
@@ -281,18 +284,18 @@ export class PMTilesClient {
             if (oldestKey) {
                 const evictedTile = this.activeTiles.get(oldestKey);
                 if (evictedTile) {
-                    const MAX_POOL_SIZE = 50;
-                    if (this.bufferPool.x.length < MAX_POOL_SIZE) {
-                        if (evictedTile.xBuffer) this.bufferPool.x.push(evictedTile.xBuffer);
-                        if (evictedTile.yBuffer) this.bufferPool.y.push(evictedTile.yBuffer);
-                        if (evictedTile.colorBuffer) this.bufferPool.color.push(evictedTile.colorBuffer);
-                        if (evictedTile.sizeBuffer) this.bufferPool.size.push(evictedTile.sizeBuffer);
-                        if (evictedTile.ixBuffer) this.bufferPool.ix.push(evictedTile.ixBuffer);
-                        if (evictedTile.parallaxBuffer) this.bufferPool.parallax.push(evictedTile.parallaxBuffer);
-                        if (evictedTile.teffBuffer) this.bufferPool.teff.push(evictedTile.teffBuffer);
-                        if (evictedTile.pmraBuffer) this.bufferPool.pmra.push(evictedTile.pmraBuffer);
-                        if (evictedTile.pmdecBuffer) this.bufferPool.pmdec.push(evictedTile.pmdecBuffer);
-                        if (evictedTile.rvBuffer) this.bufferPool.rv.push(evictedTile.rvBuffer);
+                    const MAX_POOL_SIZE = this.maxCacheSize;
+                    if (evictedTile.columns) {
+                        for (const colName of Object.keys(evictedTile.columns)) {
+                            let colPool = this.bufferPool.columns.get(colName);
+                            if (!colPool) {
+                                colPool = [];
+                                this.bufferPool.columns.set(colName, colPool);
+                            }
+                            if (colPool.length < MAX_POOL_SIZE) {
+                                colPool.push(evictedTile.columns[colName]);
+                            }
+                        }
                     }
                 }
                 this.activeTiles.delete(oldestKey);
@@ -314,8 +317,15 @@ export class PMTilesClient {
 
     private parseArrowInWorker(key: string, dataArray: (Uint8Array | null)[], t0: number, tNetEnd: number, signal: AbortSignal): Promise<TileData> {
         return new Promise((resolve, reject) => {
-            const onAbort = () => {
+            let timeoutId: ReturnType<typeof setTimeout>;
+
+            const cleanup = () => {
+                clearTimeout(timeoutId);
                 this.resolvers.delete(key);
+            };
+
+            const onAbort = () => {
+                cleanup();
                 reject(new DOMException('Aborted', 'AbortError'));
             };
             
@@ -325,47 +335,59 @@ export class PMTilesClient {
             }
             signal.addEventListener('abort', onAbort);
 
-            this.resolvers.set(key, { resolve, reject, t0, tNetEnd, signal, onAbort });
+            // Timeout after 15 seconds to prevent memory leaks from hung workers
+            timeoutId = setTimeout(() => {
+                signal.removeEventListener('abort', onAbort);
+                cleanup();
+                reject(new Error(`Worker decode timeout for tile ${key}`));
+            }, 15000);
+
+            const wrappedResolve = (val: any) => { clearTimeout(timeoutId); resolve(val); };
+            const wrappedReject = (err: any) => { clearTimeout(timeoutId); reject(err); };
+
+            this.resolvers.set(key, { resolve: wrappedResolve, reject: wrappedReject, t0, tNetEnd, signal, onAbort });
             
-            const copies = dataArray.map(d => d ? d.slice() : null);
-            const pooledX = this.bufferPool.x.pop();
-            const pooledY = this.bufferPool.y.pop();
-            const pooledColor = this.bufferPool.color.pop();
-            const pooledSize = this.bufferPool.size.pop();
-            const pooledIx = this.bufferPool.ix.pop();
-            const pooledParallax = this.bufferPool.parallax.pop();
-            const pooledTeff = this.bufferPool.teff.pop();
-            const pooledPmra = this.bufferPool.pmra.pop();
-            const pooledPmdec = this.bufferPool.pmdec.pop();
-            const pooledRv = this.bufferPool.rv.pop();
+            const rawPayloadsToTransfer: ArrayBuffer[] = [];
+            const copies = dataArray.map(d => {
+                if (!d) return null;
+                // Zero-Allocation Buffer Pooling
+                let buf = this.bufferPool.rawPayload.pop();
+                if (!buf || buf.byteLength !== d.byteLength) {
+                    buf = new ArrayBuffer(d.byteLength);
+                }
+                
+                let sourceData: Uint8Array;
+                if (d instanceof Uint8Array) {
+                    sourceData = d;
+                } else if ((d as any).buffer !== undefined) {
+                    sourceData = new Uint8Array((d as any).buffer, (d as any).byteOffset, (d as any).byteLength);
+                } else {
+                    sourceData = new Uint8Array(d as ArrayBuffer);
+                }
+                
+                new Uint8Array(buf).set(sourceData);
+                
+                rawPayloadsToTransfer.push(buf);
+                return buf;
+            });
+            const pooledColumns: Record<string, ArrayBuffer> = {};
+            for (const col of this.requestedColumns) {
+                const p = this.bufferPool.columns.get(col)?.pop();
+                if (p) pooledColumns[col] = p;
+            }
             
-            const transferables = copies.filter(c => c !== null).map(c => c!.buffer);
-            if (pooledX) transferables.push(pooledX);
-            if (pooledY) transferables.push(pooledY);
-            if (pooledColor) transferables.push(pooledColor);
-            if (pooledSize) transferables.push(pooledSize);
-            if (pooledIx) transferables.push(pooledIx);
-            if (pooledParallax) transferables.push(pooledParallax);
-            if (pooledTeff) transferables.push(pooledTeff);
-            if (pooledPmra) transferables.push(pooledPmra);
-            if (pooledPmdec) transferables.push(pooledPmdec);
-            if (pooledRv) transferables.push(pooledRv);
+            const transferables = [...rawPayloadsToTransfer];
+            for (const col of Object.keys(pooledColumns)) {
+                transferables.push(pooledColumns[col]);
+            }
 
             const w = this.workers[this.workerIndex++ % this.workers.length];
             w.postMessage({ 
                 action: 'decode', 
                 key, 
                 buffers: copies,
-                pooledX,
-                pooledY,
-                pooledColor,
-                pooledSize,
-                pooledIx,
-                pooledParallax,
-                pooledTeff,
-                pooledPmra,
-                pooledPmdec,
-                pooledRv
+                requestedColumns: this.requestedColumns,
+                pooledColumns: pooledColumns
             }, { transfer: transferables } as any);
         });
     }
@@ -383,15 +405,16 @@ export class PMTilesClient {
 
         try {
             const t0 = performance.now();
-            const promises = [this.corePmtiles.getZxy(z, x, y, abortController.signal)];
+            const swallowAbort = (e: any) => { if (e.name !== 'AbortError') console.error(e); return undefined; };
+            const promises = [this.corePmtiles.getZxy(z, x, y, abortController.signal).catch(swallowAbort)];
             for (const layer of this.layerPmtiles) {
-                promises.push(layer.getZxy(z, x, y, abortController.signal));
+                promises.push(layer.getZxy(z, x, y, abortController.signal).catch(swallowAbort));
             }
             const tiles = await Promise.all(promises);
             const tNetEnd = performance.now();
             
             if (tiles[0]) {
-                const payloads = tiles.map(t => t ? new Uint8Array(t.data) : null);
+                const payloads = tiles.map(t => t ? t.data : null);
                 
                 const tileData = await this.parseArrowInWorker(key, payloads, t0, tNetEnd, abortController.signal);
                 this.activeTiles.set(key, tileData);

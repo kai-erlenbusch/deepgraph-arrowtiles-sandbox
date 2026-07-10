@@ -49,16 +49,33 @@ export class Scatterplot {
   public currentZoomUniform = uniform(0.0);
   public globalTimeUniform = uniform(0.0);
   public vpMatrixUniform = uniform(new THREE.Matrix4());
+  public modeUniform = uniform(0.0); // 0.0 = Gaia Baseline, 1.0 = Chart Mode
   private rootArea: number;
   private rendererWrapper: Renderer;
+
+  public getActiveColumns(config: EncodingConfig): string[] {
+      const cols = new Set<string>();
+      if (config.x?.field) cols.add(config.x.field);
+      if (config.y?.field) cols.add(config.y.field);
+      if (config.color?.field) cols.add(config.color.field);
+      if (config.size?.field) cols.add(config.size.field);
+      
+      // Always ensure Gaia baseline fields exist if requested
+      cols.add('bp_rp');
+      cols.add('abs_m');
+      
+      cols.add('x_u16');
+      cols.add('y_u16');
+      return Array.from(cols);
+  }
 
   constructor(scene: THREE.Scene, rendererWrapper: Renderer, rootBounds: BoundingBox) {
     this.scene = scene;
     this.rendererWrapper = rendererWrapper;
     this.rootArea = (rootBounds.maxX - rootBounds.minX) * (rootBounds.maxY - rootBounds.minY);
 
-    // 1. Pre-allocate 800 discrete meshes, perfectly chunking the geometry
     const mainMaterial = this.createMainMaterial();
+    const initialCols = this.getActiveColumns(this.currentConfig);
 
     for (let i = 0; i < this.maxTiles; i++) {
         const geo = new THREE.InstancedBufferGeometry();
@@ -66,18 +83,11 @@ export class Scatterplot {
         geo.attributes.position = this.quadGeometry.attributes.position;
         geo.attributes.uv = this.quadGeometry.attributes.uv;
         
-        // Use standard WebGPU Instanced Attributes
-        geo.setAttribute('offsetX', new THREE.InstancedBufferAttribute(new Uint16Array(this.rowsPerTile), 1, true));
-        geo.setAttribute('offsetY', new THREE.InstancedBufferAttribute(new Uint16Array(this.rowsPerTile), 1, true));
-        geo.setAttribute('pointIx', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile), 1));
-        geo.setAttribute('instanceColor', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile), 1));
-        geo.setAttribute('instanceSize', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile), 1));
         geo.setAttribute('spawnTime', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile).fill(-1000.0), 1));
-        geo.setAttribute('parallax', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile), 1));
-        geo.setAttribute('teff', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile), 1));
-        geo.setAttribute('pmra', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile), 1));
-        geo.setAttribute('pmdec', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile), 1));
-        geo.setAttribute('rv', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile), 1));
+        
+        for (const col of initialCols) {
+             geo.setAttribute(col, new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile).fill(0.0), 1));
+        }
         
         geo.instanceCount = 0; // Initialize empty to prevent garbage rendering
 
@@ -98,6 +108,17 @@ export class Scatterplot {
       this.previousConfig = { ...this.currentConfig };
       this.currentConfig = { ...this.currentConfig, ...config };
       
+      const newCols = this.getActiveColumns(this.currentConfig);
+      
+      for (let i = 0; i < this.maxTiles; i++) {
+          const geo = this.slotMeshes[i].geometry as THREE.InstancedBufferGeometry;
+          for (const col of newCols) {
+              if (!geo.attributes[col]) {
+                  geo.setAttribute(col, new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile).fill(0.0), 1));
+              }
+          }
+      }
+      
       const newMaterial = this.createMainMaterial(this.previousConfig, this.currentConfig);
       for (let i = 0; i < this.maxTiles; i++) {
           if (this.slotMeshes[i]) {
@@ -106,6 +127,7 @@ export class Scatterplot {
       }
       
       this.startTransition();
+      return newCols;
   }
 
   private startTransition() {
@@ -135,18 +157,9 @@ export class Scatterplot {
   }
 
   private createMainMaterial(prevConfig: EncodingConfig = this.currentConfig, currConfig: EncodingConfig = this.currentConfig) {
-    // Abstracted TSL inputs allow ALL 800 meshes to perfectly share this 1 Pipeline!
-    const rawColor = float(attribute('instanceColor', 'float'));
-    const rawMag = float(attribute('instanceSize', 'float'));
-    const offsetX = attribute('offsetX', 'float');
-    const offsetY = attribute('offsetY', 'float');
-    const pointIx = float(attribute('pointIx', 'float'));
+    const offsetX = attribute('x_u16', 'float');
+    const offsetY = attribute('y_u16', 'float');
     const spawnTime = float(attribute('spawnTime', 'float'));
-    const parallax = float(attribute('parallax', 'float'));
-    const teff = float(attribute('teff', 'float'));
-    const pmra = float(attribute('pmra', 'float'));
-    const pmdec = float(attribute('pmdec', 'float'));
-    const rv = float(attribute('rv', 'float'));
 
     const tileOffsetX = float(userData('tileOffsetX', 'float'));
     const tileOffsetY = float(userData('tileOffsetY', 'float'));
@@ -156,85 +169,10 @@ export class Scatterplot {
     const globalX = tileOffsetX.add(offsetX.mul(tileScale));
     const globalY = tileOffsetY.add(offsetY.mul(tileScale));
 
-    const mat = new MeshBasicNodeMaterial({
-      transparent: true,
-      alphaTest: 0.001,
-      depthWrite: false,
-      depthTest: false,
-      blending: THREE.CustomBlending,
-      blendSrc: THREE.OneFactor,
-      blendDst: THREE.OneFactor, // True Additive Blending
-      blendEquation: THREE.AddEquation,
-      side: THREE.DoubleSide
-    });
-
-    const zoomT = this.rendererWrapper.zoomTUniform;
-    const targetPixels = mix(float(1.0), float(2.0), zoomT);
-    
-    // Handle NaNs natively in the shader (NaN != NaN is True)
-    const isMagNaN = rawMag.equal(rawMag).not();
-    const safeRawMag = select(isMagNaN, float(20.0), rawMag);
-    
-    const isColorNaN = rawColor.equal(rawColor).not();
-    const safeRawColor = select(isColorNaN, float(0.0), rawColor);
-    
-    // --- SIZE LOGIC ---
-    const SEMANTIC_TOKEN_THRESHOLD = 30.0;
-    const isTokens = safeRawMag.greaterThan(SEMANTIC_TOKEN_THRESHOLD);
-    const tokenSize = max(float(0.5), log2(max(safeRawMag, float(1.0))));
-    
-    // GAIA BASELINE SIZE
-    const gaiaBaseSize = max(float(0.05), float(21.0).sub(safeRawMag).div(float(10.0)));
-    const computedGaiaSize = select(isTokens, tokenSize, gaiaBaseSize);
-    const instanceGaiaSize = mix(float(1.2), float(3.0), zoomT).mul(computedGaiaSize);
-    
-    // CHART MODE SIZE
-    const gaiaSizeClamp = clamp(float(21.0).sub(safeRawMag).div(float(8.0)), float(0.15), float(4.0));
-    const computedChartSize = select(isTokens, tokenSize, gaiaSizeClamp);
-    const linearSize = mix(float(1.5), float(3.0), zoomT);
-    const zoomLevel = this.currentZoomUniform;
-    const ultraDeepBoost = smoothstep(float(3.0), float(9.0), zoomLevel);
-    const faintStarIsolator = smoothstep(float(15.0), float(19.0), safeRawMag);
-    const targetedDeepBoost = ultraDeepBoost.mul(faintStarIsolator);
-    const finalSizeMultiplier = float(1.0).add(targetedDeepBoost.mul(float(1.5)));
-    const instanceChartSize = linearSize.mul(computedChartSize).mul(finalSizeMultiplier);
-    
-    const isVisible = isTokens.or(safeRawMag.lessThanEqual(this.maxMagUniform));
-    
-    const instanceSize = mix(instanceGaiaSize, instanceChartSize, this.modeUniform);
-    const safeSize = select(isVisible, targetPixels.mul(this.rendererWrapper.worldUnitsPerPixelUniform).mul(instanceSize), float(0.0));
-    
-    // --- OPACITY LOGIC ---
-    // GAIA BASELINE OPACITY
-    const opacityRamp = sqrt(zoomT); 
-    const baseGaiaOpacity = mix(float(0.03), float(0.10), opacityRamp);
-    
-    // CHART MODE OPACITY
-    const linearOpacity = mix(float(0.04), float(0.12), zoomT);
-    const deepBoost = max(float(0.0), zoomT.sub(float(0.5)));
-    const baseChartOpacity = clamp(linearOpacity.add(deepBoost.mul(float(0.08))), float(0.02), float(0.25));
-    const finalOpacityMultiplier = float(1.0).add(targetedDeepBoost.mul(float(4.0)));
-    
-    const magFade = clamp(this.maxMagUniform.sub(safeRawMag), float(0.0), float(1.0));
-    const finalBaseGaiaOpacity = select(isTokens, baseGaiaOpacity, baseGaiaOpacity.mul(magFade));
-    const finalBaseChartOpacity = select(isTokens, baseChartOpacity, baseChartOpacity.mul(magFade)).mul(finalOpacityMultiplier);
-    
-    const dynamicGaiaOpacity = clamp(finalBaseGaiaOpacity, float(1.0 / 255.0), float(1.0));
-    const dynamicChartOpacity = clamp(finalBaseChartOpacity, float(1.0 / 255.0), float(1.0));
-    const dynamicOpacity = mix(dynamicGaiaOpacity, dynamicChartOpacity, this.modeUniform);
-    
-    // --- COLOR LOGIC ---
     const getField = (field: string) => {
         if (field === 'x_u16') return globalX;
         if (field === 'y_u16') return globalY;
-        if (field === 'bp_rp') return rawColor;
-        if (field === 'abs_m') return rawMag;
-        if (field === 'parallax') return parallax;
-        if (field === 'teff_gspphot') return teff;
-        if (field === 'pmra') return pmra;
-        if (field === 'pmdec') return pmdec;
-        if (field === 'radial_velocity') return rv;
-        return float(0.0);
+        return float(attribute(field, 'float'));
     };
 
     const mapVal = (val: any, domain: [number, number] | undefined, range: [number, number] | undefined) => {
@@ -243,82 +181,6 @@ export class Scatterplot {
         return mix(float(range[0]), float(range[1]), clamp(t, 0.0, 1.0));
     };
 
-    // GAIA BASELINE COLOR
-    const val = safeRawColor;
-    const cBlue = vec3(0x11/255.0, 0x22/255.0, 0xaa/255.0);
-    const cLtBlue = vec3(0x55/255.0, 0xaa/255.0, 0xdd/255.0);
-    const cWhite = vec3(1.0, 1.0, 1.0);
-    const cOrange = vec3(0xff/255.0, 0x99/255.0, 0x00/255.0);
-    const cRed = vec3(0xcc/255.0, 0x22/255.0, 0x00/255.0);
-
-    const mix1Gaia = smoothstep(-5.0, -2.5, val);
-    const mix2Gaia = smoothstep(-2.5, 0.0, val);
-    const mix3Gaia = smoothstep(0.0, 2.5, val);
-    const mix4Gaia = smoothstep(2.5, 5.0, val);
-
-    let colorGaia = mix(cBlue, cLtBlue, mix1Gaia);
-    colorGaia = mix(colorGaia, cWhite, mix2Gaia);
-    colorGaia = mix(colorGaia, cOrange, mix3Gaia);
-    const baseGaiaColor = mix(colorGaia, cRed, mix4Gaia);
-
-    // CHART MODE COLOR
-    const colorField = currConfig.color?.field ? getField(currConfig.color.field) : rawColor;
-    const isColorNaN2 = colorField.equal(colorField).not();
-    const safeColor2 = select(isColorNaN2, float(0.0), colorField);
-    
-    let baseChartColor = vec3(1.0, 1.0, 1.0);
-    if (currConfig.color?.range === 'rdbu') {
-        let cDomain = currConfig.color?.domain || [-5.0, 5.0];
-        const t = clamp(safeColor2.sub(float(cDomain[0])).div(float(cDomain[1] - cDomain[0])), 0.0, 1.0);
-        const mix1 = smoothstep(0.0, 0.25, t);
-        const mix2 = smoothstep(0.25, 0.5, t);
-        const mix3 = smoothstep(0.5, 0.75, t);
-        const mix4 = smoothstep(0.75, 1.0, t);
-        let color = mix(cBlue, cLtBlue, mix1);
-        color = mix(color, cWhite, mix2);
-        color = mix(color, cOrange, mix3);
-        baseChartColor = mix(color, cRed, mix4);
-    } else if (currConfig.color?.range === 'viridis') {
-        const c1 = vec3(0.26, 0.00, 0.32);
-        const c2 = vec3(0.19, 0.40, 0.55);
-        const c3 = vec3(0.12, 0.63, 0.53);
-        const c4 = vec3(0.99, 0.90, 0.14);
-        let cDomain = currConfig.color?.domain || [0.0, 100.0];
-        const t = clamp(safeColor2.sub(float(cDomain[0])).div(float(cDomain[1] - cDomain[0])), 0.0, 1.0);
-        const mix1 = smoothstep(0.0, 0.33, t);
-        const mix2 = smoothstep(0.33, 0.66, t);
-        const mix3 = smoothstep(0.66, 1.0, t);
-        let color = mix(c1, c2, mix1);
-        color = mix(color, c3, mix2);
-        baseChartColor = mix(color, c4, mix3);
-    }
-
-    const baseColor = mix(baseGaiaColor, baseChartColor, this.modeUniform);
-    
-    // --- ALPHA & BLENDING ---
-    const threshold = float(1.0 / 255.0);
-    const distanceToCenter = distance(uv(), vec2(0.5));
-    
-    const alphaEdgeGaia = float(1.0).sub(smoothstep(float(0.35), float(0.5), distanceToCenter));
-    const alphaEdgeChart = float(1.0).sub(smoothstep(float(0.0), float(0.5), distanceToCenter));
-    const alphaEdge = mix(alphaEdgeGaia, alphaEdgeChart, this.modeUniform);
-    
-    const finalAlpha = alphaEdge.mul(dynamicOpacity);
-
-    const isSubPixelOpacity = finalAlpha.lessThan(threshold);
-    const randomVal = varying(hash(instanceIndex).mul(float(255.0)));
-    const probDiscard = randomVal.greaterThan(finalAlpha.mul(float(255.0)));
-    
-    // Opacity Fade-in
-    const age = this.globalTimeUniform.sub(spawnTime);
-    const fadeAlpha = smoothstep(0.0, 0.3, age);
-    
-    const shouldDiscard = distanceToCenter.greaterThan(0.5).or(isSubPixelOpacity.and(probDiscard));
-    const safeAlpha = select(shouldDiscard, float(0.0), max(finalAlpha, threshold).mul(fadeAlpha));
-
-    mat.colorNode = baseColor.mul(safeAlpha);
-    mat.opacityNode = safeAlpha;
-    
     const getMappedPos = (cfg: EncodingConfig) => {
         const xField = cfg.x?.field ? getField(cfg.x.field) : globalX;
         const mappedX = mapVal(xField, cfg.x?.domain, cfg.x?.range);
@@ -354,8 +216,129 @@ export class Scatterplot {
     const finalY = mix(prevPos.y, currPos.y, this.transitionTUniform);
 
     const offset3D = vec3(finalX, finalY, float(0.0));
-    mat.positionNode = select(isVisible, offset3D.add(positionLocal.mul(safeSize)), vec3(1000000.0));
 
+    // Determine Size
+    const sizeField = currConfig.size?.field ? getField(currConfig.size.field) : float(1.0);
+    const mappedSize = mapVal(sizeField, currConfig.size?.domain, currConfig.size?.range || [1.0, 1.0]);
+    
+    const zoomT = this.rendererWrapper.zoomTUniform;
+    const targetPixels = mix(float(1.0), float(2.0), zoomT);
+
+    // Scale and cap the base size 
+    const rawMagGaia = getField('abs_m');
+    const safeRawMagGaia = select(rawMagGaia.equal(rawMagGaia).not(), float(0.0), rawMagGaia);
+    const isTokens = safeRawMagGaia.greaterThan(30.0);
+    const tokenSize = max(float(0.5), log2(max(safeRawMagGaia, float(1.0))));
+    const gaiaSize = max(float(0.05), float(21.0).sub(safeRawMagGaia).div(float(10.0)));
+    const computedSizeGaia = select(isTokens, tokenSize, gaiaSize);
+    
+    const instanceSizeGaia = mix(float(1.2), float(3.0), zoomT).mul(computedSizeGaia);
+    
+    const isVisibleGaia = rawMagGaia.greaterThan(0.0)
+                      .and(isTokens.or(safeRawMagGaia.lessThanEqual(this.maxMagUniform)));
+    const safeSizeGaia = select(isVisibleGaia, targetPixels.mul(this.rendererWrapper.worldUnitsPerPixelUniform).mul(instanceSizeGaia), float(0.0));
+    
+    const isGaiaMode = this.modeUniform.lessThan(0.5);
+    const safeSize = select(isGaiaMode, safeSizeGaia, targetPixels.mul(this.rendererWrapper.worldUnitsPerPixelUniform).mul(mappedSize));
+
+    // Determine Color (Chart Mode)
+    const colorField = currConfig.color?.field ? getField(currConfig.color.field) : float(0.0);
+    const isColorNaN = colorField.equal(colorField).not();
+    const safeColor = select(isColorNaN, float(0.0), colorField);
+
+    let baseChartColor = vec3(1.0, 1.0, 1.0);
+    if (currConfig.color?.range === 'rdbu') {
+        const cBlue = vec3(0x11/255.0, 0x22/255.0, 0xaa/255.0);
+        const cLtBlue = vec3(0x55/255.0, 0xaa/255.0, 0xdd/255.0);
+        const cWhite = vec3(1.0, 1.0, 1.0);
+        const cOrange = vec3(0xff/255.0, 0x99/255.0, 0x00/255.0);
+        const cRed = vec3(0xcc/255.0, 0x22/255.0, 0x00/255.0);
+        
+        let cDomain = currConfig.color?.domain || [-5.0, 5.0];
+        const t = clamp(safeColor.sub(float(cDomain[0])).div(float(cDomain[1] - cDomain[0])), 0.0, 1.0);
+        const mix1 = smoothstep(0.0, 0.25, t);
+        const mix2 = smoothstep(0.25, 0.5, t);
+        const mix3 = smoothstep(0.5, 0.75, t);
+        const mix4 = smoothstep(0.75, 1.0, t);
+        let color = mix(cBlue, cLtBlue, mix1);
+        color = mix(color, cWhite, mix2);
+        color = mix(color, cOrange, mix3);
+        baseChartColor = mix(color, cRed, mix4);
+    } else if (currConfig.color?.range === 'viridis') {
+        const c1 = vec3(0.26, 0.00, 0.32);
+        const c2 = vec3(0.19, 0.40, 0.55);
+        const c3 = vec3(0.12, 0.63, 0.53);
+        const c4 = vec3(0.99, 0.90, 0.14);
+        let cDomain = currConfig.color?.domain || [0.0, 100.0];
+        const t = clamp(safeColor.sub(float(cDomain[0])).div(float(cDomain[1] - cDomain[0])), 0.0, 1.0);
+        const mix1 = smoothstep(0.0, 0.33, t);
+        const mix2 = smoothstep(0.33, 0.66, t);
+        const mix3 = smoothstep(0.66, 1.0, t);
+        let color = mix(c1, c2, mix1);
+        color = mix(color, c3, mix2);
+        baseChartColor = mix(color, c4, mix3);
+    }
+    
+    // Determine Color (Gaia Baseline)
+    const rawColorGaia = getField('bp_rp');
+    const isColorNaNGaia = rawColorGaia.equal(rawColorGaia).not();
+    const safeColorGaia = select(isColorNaNGaia, float(0.0), rawColorGaia);
+    const mix1G = smoothstep(-5.0, -2.5, safeColorGaia);
+    const mix2G = smoothstep(-2.5, 0.0, safeColorGaia);
+    const mix3G = smoothstep(0.0, 2.5, safeColorGaia);
+    const mix4G = smoothstep(2.5, 5.0, safeColorGaia);
+    let colorG = mix(vec3(0x11/255.0, 0x22/255.0, 0xaa/255.0), vec3(0x55/255.0, 0xaa/255.0, 0xdd/255.0), mix1G);
+    colorG = mix(colorG, vec3(1.0, 1.0, 1.0), mix2G);
+    colorG = mix(colorG, vec3(0xff/255.0, 0x99/255.0, 0x00/255.0), mix3G);
+    const baseGaiaColor = mix(colorG, vec3(0xcc/255.0, 0x22/255.0, 0x00/255.0), mix4G);
+    
+    // Final Base Color
+    const finalBaseColor = select(isGaiaMode, baseGaiaColor, baseChartColor);
+    
+    // Opacity
+    const opacityRamp = sqrt(zoomT); 
+    const dynamicOpacityChart = mix(float(0.01), float(0.10), opacityRamp); // Scales naturally with zoom
+    
+    const baseOpacityGaia = mix(float(0.03), float(0.10), opacityRamp);
+    const magFade = clamp(this.maxMagUniform.sub(safeRawMagGaia), float(0.0), float(1.0));
+    const finalBaseOpacityGaia = select(isTokens, baseOpacityGaia, baseOpacityGaia.mul(magFade));
+    const dynamicOpacityGaia = clamp(finalBaseOpacityGaia, float(1.0 / 255.0), float(1.0));
+    
+    const dynamicOpacity = select(isGaiaMode, dynamicOpacityGaia, dynamicOpacityChart);
+    
+    const distanceToCenter = distance(uv(), vec2(0.5));
+    const alphaEdge = float(1.0).sub(smoothstep(float(0.0), float(0.5), distanceToCenter));
+    
+    const threshold = float(1.0 / 255.0);
+    const finalAlpha = alphaEdge.mul(dynamicOpacity);
+
+    const isSubPixelOpacity = finalAlpha.lessThan(threshold);
+    const randomVal = varying(hash(instanceIndex).mul(float(255.0)));
+    const probDiscard = randomVal.greaterThan(finalAlpha.mul(float(255.0)));
+    
+    // Opacity Fade-in
+    const age = this.globalTimeUniform.sub(spawnTime);
+    const fadeAlpha = smoothstep(0.0, 0.3, age);
+    
+    const shouldDiscard = distanceToCenter.greaterThan(0.5).or(isSubPixelOpacity.and(probDiscard));
+    const safeAlpha = select(shouldDiscard, float(0.0), max(finalAlpha, threshold).mul(fadeAlpha));
+
+    const mat = new MeshBasicNodeMaterial({
+      transparent: true,
+      alphaTest: 0.001,
+      depthWrite: false,
+      depthTest: false,
+      blending: THREE.CustomBlending,
+      blendSrc: THREE.OneFactor,
+      blendDst: THREE.OneFactor,
+      blendEquation: THREE.AddEquation,
+      side: THREE.DoubleSide
+    });
+
+    const isVisible = select(isGaiaMode, isVisibleGaia, float(1.0));
+    mat.colorNode = finalBaseColor.mul(safeAlpha);
+    mat.opacityNode = safeAlpha;
+    mat.positionNode = select(isVisible, offset3D.add(positionLocal.mul(safeSize)), vec3(1000000.0));
     return mat;
   }
 
@@ -478,67 +461,39 @@ export class Scatterplot {
         this.slotMeshes[slot].userData.tileScale = scale;
         
         const numItems = Math.min(tile.numRows, this.rowsPerTile);
+        console.log(`Tile ${tile.key} | numRows: ${tile.numRows} | numItems: ${numItems}`);
         geo.instanceCount = numItems;
         
-        if (tile.xBuffer && tile.yBuffer) {
-            const ox = geo.getAttribute('offsetX') as THREE.InstancedBufferAttribute;
-            (ox.array as Uint16Array).set(new Uint16Array(tile.xBuffer).subarray(0, numItems));
-            ox.clearUpdateRanges();
-            ox.addUpdateRange(0, numItems);
-            ox.needsUpdate = true;
-            
-            const oy = geo.getAttribute('offsetY') as THREE.InstancedBufferAttribute;
-            (oy.array as Uint16Array).set(new Uint16Array(tile.yBuffer).subarray(0, numItems));
-            oy.clearUpdateRanges();
-            oy.addUpdateRange(0, numItems);
-            oy.needsUpdate = true;
-
-            const ixBuf = tile.ixBuffer || new Float32Array(numItems);
-            const ix = geo.getAttribute('pointIx') as THREE.InstancedBufferAttribute;
-            (ix.array as Float32Array).set(ixBuf.subarray(0, numItems));
-            ix.clearUpdateRanges();
-            ix.addUpdateRange(0, numItems);
-            ix.needsUpdate = true;
-        }
+        const backend = (this.rendererWrapper.renderer as any).backend;
+        const webgpuDevice = backend.device;
         
-        if (tile.colorBuffer) {
+        const writeToGPU = (attrName: string, buffer: ArrayBuffer | undefined) => {
+            if (!buffer) return;
+            const attr = geo.getAttribute(attrName) as THREE.InstancedBufferAttribute;
+            if (!attr) return; // Prevent crashes if attribute isn't allocated yet
+            const backendAttr = backend.get(attr);
+            
+            if (backendAttr && backendAttr.buffer) {
+                // Fast Path: Write zero-copy payload directly to the VRAM hardware queue
+                webgpuDevice.queue.writeBuffer(backendAttr.buffer, 0, buffer, 0, numItems * 4);
+            } else {
+                // Slow Path Fallback: Used only on the very first frame before Three.js allocates the GPU buffer
+                (attr.array as Float32Array).set(new Float32Array(buffer).subarray(0, numItems));
+                attr.needsUpdate = true;
+                attr.clearUpdateRanges();
+                attr.addUpdateRange(0, numItems);
+            }
+        };
+
+        if (tile.columns) {
+            for (const colName of Object.keys(tile.columns)) {
+                writeToGPU(colName, tile.columns[colName]);
+            }
             const currentTime = performance.now() / 1000.0;
             const spawnTimeArray = new Float32Array(numItems).fill(currentTime);
-
-            const ic = geo.getAttribute('instanceColor') as THREE.InstancedBufferAttribute;
-            (ic.array as Float32Array).set(tile.colorBuffer.subarray(0, numItems));
-            ic.clearUpdateRanges();
-            ic.addUpdateRange(0, numItems);
-            ic.needsUpdate = true;
-
-            const is = geo.getAttribute('instanceSize') as THREE.InstancedBufferAttribute;
-            (is.array as Float32Array).set(tile.sizeBuffer!.subarray(0, numItems));
-            is.clearUpdateRanges();
-            is.addUpdateRange(0, numItems);
-            is.needsUpdate = true;
-
-            const st = geo.getAttribute('spawnTime') as THREE.InstancedBufferAttribute;
-            (st.array as Float32Array).set(spawnTimeArray);
-            st.clearUpdateRanges();
-            st.addUpdateRange(0, numItems);
-            st.needsUpdate = true;
-
-            const updateExtraBuf = (name: string, buf: Float32Array | undefined) => {
-                if (buf) {
-                    const attr = geo.getAttribute(name) as THREE.InstancedBufferAttribute;
-                    (attr.array as Float32Array).set(buf.subarray(0, numItems));
-                    attr.clearUpdateRanges();
-                    attr.addUpdateRange(0, numItems);
-                    attr.needsUpdate = true;
-                }
-            };
-            
-            updateExtraBuf('parallax', tile.parallaxBuffer);
-            updateExtraBuf('teff', tile.teffBuffer);
-            updateExtraBuf('pmra', tile.pmraBuffer);
-            updateExtraBuf('pmdec', tile.pmdecBuffer);
-            updateExtraBuf('rv', tile.rvBuffer);
-        }        tile.needsUpdate = false;
+            writeToGPU('spawnTime', spawnTimeArray.buffer);
+        }
+        tile.needsUpdate = false;
       }
       
       this.slotMeshes[slot].visible = geo.instanceCount > 0;
