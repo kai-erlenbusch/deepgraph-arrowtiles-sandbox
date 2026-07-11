@@ -13,7 +13,7 @@ import { Renderer } from './core/Renderer';
 import { PMTilesClient } from './PMTilesClient';
 import type { BoundingBox, TileData } from './PMTilesClient';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-const TILE_SERVER_URL = `/gaia_07_09_2026.arrowtiles`;
+const TILE_SERVER_URL = `/gaia_full.arrowtiles`;
 
 
 import { Scatterplot } from './Scatterplot';

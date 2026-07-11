@@ -1,20 +1,14 @@
-# Deepgraph WebGPU: ArrowTiles Sandbox 🚀
+# Deepgraph WebGPU: ArrowTiles Sandbox 🌌
 
 This repository is an experimental sandbox and stress test for the WebGPU-based successor to the Deepgraph static embedding engine. 
 
-The specific goal of this sandbox was initially to push the boundaries of browser-based rendering by visualizing the **European Space Agency's (ESA) Gaia dataset**—an astronomical catalogue mapping over a billion stars.
+The specific goal of this sandbox is to push the boundaries of browser-based rendering by visualizing the **European Space Agency's (ESA) Gaia dataset**—an astronomical catalogue mapping the positions and movements of over a billion stars in the Milky Way galaxy.
 
-However, the architecture has evolved into a **Massive Declarative Scatter Plot Engine**. While Gaia remains our primary billion-row stress test for out-of-core streaming and Additive Blending LOD, the engine is now fully generic and capable of rendering any massive tabular dataset natively in the browser.
+Because the Gaia dataset is incredibly dense and massive, it serves as the ultimate stress test for out-of-core data streaming, GPU memory management, and Additive Blending LOD (Level-Of-Detail) algorithms.
 
 This repository focuses purely on the **client-side WebGPU rendering**. The data generation pipeline that builds the `.arrowtiles` archives is housed in our sibling repository, `duckdb-arrowtiles`.
 
-<div align="center">
-  <img src="assets/screenshot1.png" width="30%" />
-  <img src="assets/screenshot2.png" width="30%" />
-  <img src="assets/screenshot3.png" width="30%" />
-</div>
-
-## 🛠️ Getting Started
+## 🚀 Getting Started
 
 ### Prerequisites
 - Node.js (v18+)
@@ -58,7 +52,7 @@ graph TD
 2. **`TileManager.ts`**: Handles spatial Quadtree indexing and limits HTTP connection flooding via dynamic `overfetch` tuning.
 3. **`PMTilesClient.ts`**: Issues HTTP Range Requests to the unified `.arrowtiles` archive. It uses a dynamic Web Worker pool (`pmtiles.worker.ts`) to offload Zstandard WebAssembly decompression (`@bokuweb/zstd-wasm`) and Apache Arrow IPC parsing, ensuring the Main UI thread remains unblocked before passing zero-copy `Float32Array` buffers to the GPU.
 
-### 🔗 Sibling Projects
+### 📁 Sibling Projects
 
 This repository is strictly the frontend viewer. The heavy lifting of sorting the 1.8 billion row dataset and packing it into an `.arrowtiles` archive is done by the backend repository:
 
@@ -66,7 +60,7 @@ This repository is strictly the frontend viewer. The heavy lifting of sorting th
 
 ---
 
-## 🔍 Deep Dive: WebGPU Instanced Rendering & Density Culling
+## 🏎️ Deep Dive: WebGPU Instanced Rendering & Density Culling
 
 Traditional WebGL engines struggle to render millions of distinct geometries because the CPU cannot push that many individual `draw` calls without bottlenecking. 
 
@@ -83,47 +77,25 @@ To prevent extreme additive blowouts and preserve 60 FPS when looking at the den
 
 ---
 
-## 🚀 Recent Architectural Evolutions
+## ✨ Recent Architectural Evolutions
 
 1. **`.arrowtiles` vs `.pmtiles`:** By packing the Apache Arrow chunks into a single PMTiles-compatible archive using our backend pipeline, we leverage HTTP Range Requests. This reduces network overhead, avoids S3 file-count limits, and natively supports columnar data via Arrow IPC.
 2. **Wasm Zstd Decompression:** We migrated from pure JS decompression (`fzstd`) to a WebAssembly-native library (`@bokuweb/zstd-wasm`). This provides massive CPU savings when streaming heavy tiles.
 3. **Arrow IPC Schema Stripping:** To minimize PMTiles metadata bloat, the Arrow IPC schema header (~1KB per tile) is stripped from every chunk by the backend. `PMTilesClient.ts` asynchronously decodes this schema from the global metadata block and dynamically prepends it to chunks via the Web Worker, preserving zero-copy compatibility while shrinking the total archive size by ~12%.
-4. **Corrected Galactic Projection & Orientation:** Implemented accurate Equatorial-to-Galactic coordinate transformations in the data pipeline to prevent the dense Milky Way core from being distorted or smeared across spatial chunk boundaries. Additionally, applied WebGPU inverted-Y rendering fixes to ensure the final visual projection matches standard astronomical orientations.
-5. **Code Quality & Memory Stability Improvements:**
-   - **Type Safety:** Hard-locked Three.js versions and isolated WebGPU fast-path queue writes behind a brittle-safe `WebGPUAdapter`.
-   - **Memory Leak Resolution:** Implemented zero-allocation recycling for Zstd payload ArrayBuffers during request aborts to prevent iOS Safari memory crashes.
-   - **Worker Pool Optimization:** Swapped round-robin worker selection for an Idle-Queue worker pool that actively sheds stale tasks to avoid CPU locking during rapid zooming.
-   - **Quadtree Thrashing:** Refactored LOD tile culling to use a weighted heuristic (`DistanceToCenter + Z_Level * DepthPenalty`) ensuring viewport centers load gracefully under extreme network strain.
-   - **TSL Modularization:** Extracted sprawling closure-based shader structures into explicit, standalone `fn()` abstractions to prevent WebGPU AST binding failures.
-6. **Zoom-Linked Dynamic Cluster Boosting:** Replaced arbitrary max-tile budgeting with a geometrically accurate mapping between the camera frustum and Quadtree Z-levels. Additionally, the WebGPU shader selectively isolates **faint cluster stars** and applies an `easeOut` curve as the camera zooms into them.
-7. **Multi-Threaded Decompression Pool:** Because Zstandard decompression is extremely CPU-heavy, decompressing 100+ dense tiles simultaneously caused the main browser thread to lock up. We implemented a dynamic Round-Robin Web Worker pool scaled to `navigator.hardwareConcurrency`. PMTiles decompression and Apache Arrow IPC parsing are now entirely off-main-thread, restoring 60 FPS UI interactivity even during massive network fetches.
-8. **Declarative Render Graph & Dynamic TSL:** The `Scatterplot.ts` WebGPU engine now uses Three.js Node Materials (TSL) to dynamically compile the rendering shader based on a JSON config (e.g., swapping between Viridis, RdBu, and mapping specific scales).
-9. **Dynamic Web Worker Allocation:** The Web Worker pool no longer hardcodes column names. It accepts a dynamic `requestedColumns` array and returns exactly what the shader needs, drastically reducing memory waste on the CPU.
-10. **Zero-Allocation WebGPU Pipeline:** We completely eliminated JavaScript Garbage Collection pauses and VRAM allocation spikes during high-speed map panning:
-   - **Dimension-Safe Buffer Pooling:** The PMTiles client uses a `Map<string, ArrayBuffer[]>` to recycle memory by column name inside the Web Worker.
-   - **Direct VRAM Queue Writing:** The engine bypasses Three.js attribute reallocation and uses `device.queue.writeBuffer()` to blast worker payloads directly into pre-allocated GPU memory. This ensures the 16-attribute WebGPU limit is respected and prevents VRAM exhaustion.
-10. **Dual Rendering Modes:** The UI natively supports both **"Chart Mode"** (a fully generic visualizer for any X/Y/Color/Size tabular data) and the **"Gaia Baseline"** (our golden standard astronomy shader with custom mathematical zoom-fading).
+4. **Corrected Galactic Projection:** Applied WebGPU inverted-Y rendering fixes to ensure the final visual projection matches standard astronomical orientations.
+5. **Zoom-Linked Dynamic Cluster Boosting:** Replaced arbitrary max-tile budgeting with a geometrically accurate mapping between the camera frustum and Quadtree Z-levels. Additionally, the WebGPU shader selectively isolates **faint cluster stars** and applies an `easeOut` curve as the camera zooms into them.
+6. **Multi-Threaded Decompression Pool:** Because Zstandard decompression is extremely CPU-heavy, decompressing 100+ dense tiles simultaneously caused the main browser thread to lock up. We implemented a dynamic Round-Robin Web Worker pool scaled to `navigator.hardwareConcurrency`. PMTiles decompression and Apache Arrow IPC parsing are now entirely off-main-thread, restoring 60 FPS UI interactivity even during massive network fetches.
 
 ---
 
-## 🚧 Known Challenges & Current Limitations
+## ⚠️ Known Challenges & Current Limitations
 
 This is a stress test sandbox, and several major architectural challenges remain unresolved:
 
 - **GPU VRAM Spikes:** When panning rapidly, the quadtree traversal can fetch dozens of tiles simultaneously. While we've aggressively tuned `overfetch` to prevent network connection starvation, the engine dynamically creates new WebGPU `InstancedBufferAttributes` when loading these tiles, which can trigger VRAM exhaustion or command queue stalls on lower-end devices.
 - **Initial Payload Size:** The generated `gaia.arrowtiles` archive is ~15.8 GB, which is optimal for Range Requests, but necessitates hosting the archive on a CDN or cloud storage bucket capable of handling sustained byte-range queries efficiently.
 
-## 🗺️ Future Roadmap
-While the core pipeline successfully processes billion-row datasets, there are several major architectural leaps planned to transform ArrowTiles from a sandbox tool into a world-class spatial ecosystem.
-
-**Phase 1: Pipeline & Frontend Optimization**
-* Z-Level Partitioning (Zero-Wait Packing)
-* Native C++ Web Worker Integration
-
-**Phase 2: Core Enhancements**
-* Spatial Tile Bounds Metadata 
-
-## 📜 Citing
+## 📚 Citing
 
 If you use this software in your work or scientific research, it is important to properly cite it to acknowledge the contribution of the developers. When citing, please include the following metadata:
 
