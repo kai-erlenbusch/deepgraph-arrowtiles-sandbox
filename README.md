@@ -128,10 +128,10 @@ To prevent extreme additive blowouts and preserve 60 FPS when looking at the den
 
 ## ⚠️ Known Challenges & Current Limitations
 
-This is a stress test sandbox, and several major architectural challenges remain unresolved:
+This is a stress test sandbox, and several major architectural challenges remain unresolved when visualizing at the billion-row scale:
 
-- **GPU VRAM Spikes:** When panning rapidly, the quadtree traversal can fetch dozens of tiles simultaneously. While we've aggressively tuned `overfetch` to prevent network connection starvation, the engine dynamically creates new WebGPU `InstancedBufferAttributes` when loading these tiles, which can trigger VRAM exhaustion or command queue stalls on lower-end devices.
-- **Initial Payload Size:** The generated `gaia.arrowtiles` archive is ~15.8 GB, which is optimal for Range Requests, but necessitates hosting the archive on a CDN or cloud storage bucket capable of handling sustained byte-range queries efficiently.
+- **GPU VRAM Spikes:** When panning rapidly, the quadtree traversal can fetch dozens of tiles simultaneously. While we've aggressively tuned `overfetch` and implemented `AbortController` network cancellation to prevent HTTP starvation, the engine dynamically creates new WebGPU `InstancedBufferAttributes` for loaded tiles. Without an aggressive VRAM garbage collector, this can still trigger memory exhaustion or command queue stalls on lower-end devices.
+- **Massive Archive Hosting:** The generated `gaia.arrowtiles` baseline archive is ~15.8 GB. While optimal for HTTP Range Requests, hosting datasets of this magnitude requires a CDN or cloud storage bucket capable of handling sustained, concurrent byte-range queries efficiently.
 
 ## 📚 Citing
 
