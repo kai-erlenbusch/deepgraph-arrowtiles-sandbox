@@ -10,8 +10,10 @@ public/*.arrowtiles
 public/*.pmtiles
 public/*.parquet
 duckdb_temp/
-legacy_pipeline/
+archive/
 scratch/
+logs/
+research/
 
 # IDE and OS
 .vscode/

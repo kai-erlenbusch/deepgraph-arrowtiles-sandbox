@@ -6,8 +6,8 @@ import {
   attribute, float, positionLocal, vec3, vec4, vec2, uv, distance, smoothstep,
   hash, instanceIndex, max, select, uint, mix, clamp, log2, uniform, varying, instancedArray, storage, cameraProjectionMatrix, cameraViewMatrix, atomicAdd, time, userData, sqrt, sin, cos
 } from 'three/tsl';
-import { Renderer } from './core/Renderer';
-import type { BoundingBox, TileData } from './PMTilesClient';
+import { Renderer } from './core/Renderer.ts';
+import { PMTilesClient, type TileData } from './PMTilesClient.ts';
 
 export interface EncodingConfig {
     x?: { field: string, transform?: 'literal' | 'linear', domain?: [number, number], range?: [number, number] };
@@ -78,30 +78,12 @@ export class Scatterplot {
     const initialCols = this.getActiveColumns(this.currentConfig);
 
     for (let i = 0; i < this.maxTiles; i++) {
-        const geo = new THREE.InstancedBufferGeometry();
-        geo.index = this.quadGeometry.index;
-        geo.attributes.position = this.quadGeometry.attributes.position;
-        geo.attributes.uv = this.quadGeometry.attributes.uv;
-        
-        geo.setAttribute('spawnTime', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile).fill(-1000.0), 1));
-        
-        for (const col of initialCols) {
-             geo.setAttribute(col, new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile).fill(0.0), 1));
-        }
-        
-        geo.instanceCount = 0; // Initialize empty to prevent garbage rendering
-
-        const mesh = new THREE.Mesh(geo, mainMaterial);
-        mesh.frustumCulled = false; // We do our own Zero-Cost GPU culling via mesh.visible
-        mesh.visible = false;
-        mesh.userData.slotIndex = i; // Assign Slot ID natively for picking shader
-        mesh.userData.tileOffsetX = 0.0;
-        mesh.userData.tileOffsetY = 0.0;
-        mesh.userData.tileScale = 1.0;
-
-        this.slotMeshes.push(mesh);
-        this.scene.add(mesh);
+        this.slotMeshes.push(null as any);
     }
+  }
+
+  public setRootBounds(bounds: BoundingBox) {
+      this.rootArea = (bounds.maxX - bounds.minX) * (bounds.maxY - bounds.minY);
   }
 
   public updateEncoding(config: EncodingConfig) {
@@ -111,6 +93,7 @@ export class Scatterplot {
       const newCols = this.getActiveColumns(this.currentConfig);
       
       for (let i = 0; i < this.maxTiles; i++) {
+          if (!this.slotMeshes[i]) continue;
           const geo = this.slotMeshes[i].geometry as THREE.InstancedBufferGeometry;
           for (const col of newCols) {
               if (!geo.attributes[col]) {
@@ -146,6 +129,18 @@ export class Scatterplot {
           const t = progress * progress * (3 - 2 * progress);
           this.transitionTUniform.value = t;
           
+          for (let i = 0; i < this.maxTiles; i++) {
+              const mesh = this.slotMeshes[i];
+              if (!mesh) continue;
+              const prevX = this.mapValJS(mesh.userData.tileOffsetX, this.previousConfig.x);
+              const prevY = this.mapValJS(mesh.userData.tileOffsetY, this.previousConfig.y);
+              const currX = this.mapValJS(mesh.userData.tileOffsetX, this.currentConfig.x);
+              const currY = this.mapValJS(mesh.userData.tileOffsetY, this.currentConfig.y);
+              
+              mesh.position.x = prevX + (currX - prevX) * t;
+              mesh.position.y = prevY + (currY - prevY) * t;
+          }
+          
           if (progress < 1.0) {
               requestAnimationFrame(animate);
           } else {
@@ -156,27 +151,45 @@ export class Scatterplot {
       requestAnimationFrame(animate);
   }
 
+  private getScaleFactor(domain: [number, number] | undefined, range: [number, number] | undefined) {
+      if (!domain || !range) return float(1.0);
+      return float(range[1] - range[0]).div(float(domain[1] - domain[0]));
+  }
+
   private mapVal(val: any, domain: [number, number] | undefined, range: [number, number] | undefined) {
       if (!domain || !range) return val;
       const t = val.sub(float(domain[0])).div(float(domain[1] - domain[0]));
       return mix(float(range[0]), float(range[1]), clamp(t, 0.0, 1.0));
   }
 
-  private getMappedPos(cfg: EncodingConfig, globalX: any, globalY: any, getField: (f: string) => any) {
-      const xField = cfg.x?.field ? getField(cfg.x.field) : globalX;
-      const mappedX = this.mapVal(xField, cfg.x?.domain, cfg.x?.range);
-      
-      const yField = cfg.y?.field ? getField(cfg.y.field) : globalY;
-      const mappedY = this.mapVal(yField, cfg.y?.domain, cfg.y?.range);
-      
-      let finalX = mappedX;
-      let finalY = mappedY;
-      
-      if (cfg.x?.field === 'x_u16' || cfg.x?.transform === 'literal') {
-          finalX = mappedX;
+  private mapValJS(val: number, cfgAxis: any): number {
+      if (!cfgAxis || (cfgAxis.field !== 'x_u16' && cfgAxis.field !== 'y_u16' && cfgAxis.transform !== 'literal')) {
+          return 0.0; 
       }
-      if (cfg.y?.field === 'y_u16' || cfg.y?.transform === 'literal') {
-          finalY = mappedY;
+      const domain = cfgAxis.domain || [0, 1];
+      const range = cfgAxis.range || [0, 1];
+      const t = (val - domain[0]) / (domain[1] - domain[0]);
+      return range[0] + (range[1] - range[0]) * Math.max(0, Math.min(1, t));
+  }
+
+  private getMappedPos(cfg: EncodingConfig, offsetX: any, offsetY: any, tileScale: any, getField: (f: string) => any) {
+      const isXSpatial = cfg.x?.field === 'x_u16' || cfg.x?.transform === 'literal';
+      const isYSpatial = cfg.y?.field === 'y_u16' || cfg.y?.transform === 'literal';
+      
+      let finalX, finalY;
+      
+      if (isXSpatial) {
+          finalX = offsetX.mul(tileScale).mul(this.getScaleFactor(cfg.x?.domain, cfg.x?.range));
+      } else {
+          const xField = cfg.x?.field ? getField(cfg.x.field) : float(0.0);
+          finalX = this.mapVal(xField, cfg.x?.domain, cfg.x?.range);
+      }
+      
+      if (isYSpatial) {
+          finalY = offsetY.mul(tileScale).mul(this.getScaleFactor(cfg.y?.domain, cfg.y?.range));
+      } else {
+          const yField = cfg.y?.field ? getField(cfg.y.field) : float(0.0);
+          finalY = this.mapVal(yField, cfg.y?.domain, cfg.y?.range);
       }
       
       if (cfg.jitter) {
@@ -228,13 +241,10 @@ export class Scatterplot {
           baseChartColor = mix(color, c4, mix3);
       }
       
-      const rawColorGaia = getField('bp_rp');
-      const isColorNaNGaia = rawColorGaia.equal(rawColorGaia).not();
-      const safeColorGaia = select(isColorNaNGaia, float(0.0), rawColorGaia);
-      const mix1G = smoothstep(-5.0, -2.5, safeColorGaia);
-      const mix2G = smoothstep(-2.5, 0.0, safeColorGaia);
-      const mix3G = smoothstep(0.0, 2.5, safeColorGaia);
-      const mix4G = smoothstep(2.5, 5.0, safeColorGaia);
+      const mix1G = smoothstep(-5.0, -2.5, safeColor);
+      const mix2G = smoothstep(-2.5, 0.0, safeColor);
+      const mix3G = smoothstep(0.0, 2.5, safeColor);
+      const mix4G = smoothstep(2.5, 5.0, safeColor);
       let colorG = mix(vec3(0x11/255.0, 0x22/255.0, 0xaa/255.0), vec3(0x55/255.0, 0xaa/255.0, 0xdd/255.0), mix1G);
       colorG = mix(colorG, vec3(1.0, 1.0, 1.0), mix2G);
       colorG = mix(colorG, vec3(0xff/255.0, 0x99/255.0, 0x00/255.0), mix3G);
@@ -262,8 +272,8 @@ export class Scatterplot {
         return float(attribute(field, 'float'));
     };
 
-    const prevPos = this.getMappedPos(prevConfig, globalX, globalY, getField);
-    const currPos = this.getMappedPos(currConfig, globalX, globalY, getField);
+    const prevPos = this.getMappedPos(prevConfig, offsetX, offsetY, tileScale, getField);
+    const currPos = this.getMappedPos(currConfig, offsetX, offsetY, tileScale, getField);
     
     const finalX = mix(prevPos.x, currPos.x, this.transitionTUniform);
     const finalY = mix(prevPos.y, currPos.y, this.transitionTUniform);
@@ -272,23 +282,24 @@ export class Scatterplot {
 
     // Determine Size
     const sizeField = currConfig.size?.field ? getField(currConfig.size.field) : float(1.0);
-    const mappedSize = this.mapVal(sizeField, currConfig.size?.domain, currConfig.size?.range || [1.0, 1.0]);
+    const isSizeNaN = sizeField.equal(sizeField).not();
+    const safeSizeField = select(isSizeNaN, float(0.0), sizeField);
+    
+    const mappedSize = this.mapVal(safeSizeField, currConfig.size?.domain, currConfig.size?.range || [1.0, 1.0]);
     
     const zoomT = this.rendererWrapper.zoomTUniform;
     const targetPixels = mix(float(1.0), float(2.0), zoomT);
 
     // Scale and cap the base size 
-    const rawMagGaia = getField('abs_m');
-    const safeRawMagGaia = select(rawMagGaia.equal(rawMagGaia).not(), float(0.0), rawMagGaia);
-    const isTokens = safeRawMagGaia.greaterThan(30.0);
-    const tokenSize = max(float(0.5), log2(max(safeRawMagGaia, float(1.0))));
-    const gaiaSize = max(float(0.05), float(21.0).sub(safeRawMagGaia).div(float(10.0)));
+    const isTokens = safeSizeField.greaterThan(30.0);
+    const tokenSize = max(float(0.5), log2(max(safeSizeField, float(1.0))));
+    const gaiaSize = max(float(0.05), float(21.0).sub(safeSizeField).div(float(10.0)));
     const computedSizeGaia = select(isTokens, tokenSize, gaiaSize);
     
     const instanceSizeGaia = mix(float(1.2), float(3.0), zoomT).mul(computedSizeGaia);
     
-    const isVisibleGaia = rawMagGaia.greaterThan(0.0)
-                      .and(isTokens.or(safeRawMagGaia.lessThanEqual(this.maxMagUniform)));
+    const isVisibleGaia = sizeField.greaterThan(0.0)
+                      .and(isTokens.or(safeSizeField.lessThanEqual(this.maxMagUniform)));
     const safeSizeGaia = select(isVisibleGaia, targetPixels.mul(this.rendererWrapper.worldUnitsPerPixelUniform).mul(instanceSizeGaia), float(0.0));
     
     const isGaiaMode = this.modeUniform.lessThan(0.5);
@@ -298,10 +309,10 @@ export class Scatterplot {
     
     // Opacity
     const opacityRamp = sqrt(zoomT); 
-    const dynamicOpacityChart = mix(float(0.01), float(0.10), opacityRamp); // Scales naturally with zoom
+    const dynamicOpacityChart = mix(float(0.10), float(0.50), opacityRamp); // Scales naturally with zoom (Brighter for generic datasets)
     
     const baseOpacityGaia = mix(float(0.03), float(0.10), opacityRamp);
-    const magFade = clamp(this.maxMagUniform.sub(safeRawMagGaia), float(0.0), float(1.0));
+    const magFade = clamp(this.maxMagUniform.sub(safeSizeField), float(0.0), float(1.0));
     const finalBaseOpacityGaia = select(isTokens, baseOpacityGaia, baseOpacityGaia.mul(magFade));
     const dynamicOpacityGaia = clamp(finalBaseOpacityGaia, float(1.0 / 255.0), float(1.0));
     
@@ -425,7 +436,7 @@ export class Scatterplot {
         
         // Ensure only currently visible tiles are drawn! (Zero-Cost Culling)
         for (let i = 0; i < this.maxTiles; i++) {
-            this.slotMeshes[i].visible = false;
+            if (this.slotMeshes[i]) this.slotMeshes[i].visible = false;
         }
 
     // 2. Process added/updated tiles
@@ -439,9 +450,35 @@ export class Scatterplot {
         this.slotToTileData[slot] = tile;
         tile.needsUpdate = true;
         
-        // Prevent drawing garbage from a previous tile in this slot
-        const geo = this.slotMeshes[slot].geometry as THREE.InstancedBufferGeometry;
-        geo.instanceCount = 0;
+        if (!this.slotMeshes[slot]) {
+            const geo = new THREE.InstancedBufferGeometry();
+            geo.index = this.quadGeometry.index;
+            geo.attributes.position = this.quadGeometry.attributes.position;
+            geo.attributes.uv = this.quadGeometry.attributes.uv;
+            
+            geo.setAttribute('spawnTime', new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile).fill(-1000.0), 1));
+            
+            const activeCols = this.getActiveColumns(this.currentConfig);
+            for (const col of activeCols) {
+                 geo.setAttribute(col, new THREE.InstancedBufferAttribute(new Float32Array(this.rowsPerTile).fill(0.0), 1));
+            }
+            
+            geo.instanceCount = 0;
+
+            const mesh = new THREE.Mesh(geo, this.createMainMaterial());
+            mesh.frustumCulled = false;
+            mesh.visible = false;
+            mesh.userData.slotIndex = slot;
+            mesh.userData.tileOffsetX = 0.0;
+            mesh.userData.tileOffsetY = 0.0;
+            mesh.userData.tileScale = 1.0;
+
+            this.slotMeshes[slot] = mesh;
+            this.scene.add(mesh);
+        } else {
+            const geo = this.slotMeshes[slot].geometry as THREE.InstancedBufferGeometry;
+            geo.instanceCount = 0;
+        }
       }
       
       const slot = this.tileKeyToSlot.get(tile.key)!;
@@ -454,12 +491,22 @@ export class Scatterplot {
              continue;
         }
         
-        // Update per-mesh uniforms for the shader
         const [zStr, txStr, tyStr] = tile.key.split('/');
         const scale = 1.0 / Math.pow(2, parseInt(zStr));
-        this.slotMeshes[slot].userData.tileOffsetX = parseInt(txStr) * scale;
-        this.slotMeshes[slot].userData.tileOffsetY = parseInt(tyStr) * scale;
+        const tileOffsetX = parseInt(txStr) * scale;
+        const tileOffsetY = parseInt(tyStr) * scale;
+        
+        this.slotMeshes[slot].userData.tileOffsetX = tileOffsetX;
+        this.slotMeshes[slot].userData.tileOffsetY = tileOffsetY;
         this.slotMeshes[slot].userData.tileScale = scale;
+        
+        // RTE Precision Jitter Fix: Apply absolute base offset to mesh position (f64)
+        if (!this.isTransitioning) {
+            this.slotMeshes[slot].position.x = this.mapValJS(tileOffsetX, this.currentConfig.x);
+            this.slotMeshes[slot].position.y = this.mapValJS(tileOffsetY, this.currentConfig.y);
+            this.slotMeshes[slot].position.z = 0;
+            this.slotMeshes[slot].updateMatrixWorld();
+        }
         
         const numItems = Math.min(tile.numRows, this.rowsPerTile);
         console.log(`Tile ${tile.key} | numRows: ${tile.numRows} | numItems: ${numItems}`);

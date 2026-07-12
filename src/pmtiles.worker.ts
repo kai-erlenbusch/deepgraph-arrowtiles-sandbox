@@ -27,7 +27,7 @@ self.onmessage = async (e) => {
     
     if (data.action === 'decompress') {
         try {
-            const decompressed = zstdDecompress(new Uint8Array(data.buffer), { defaultHeapSize: 1024 * 1024 * 32 });
+            const decompressed = zstdDecompress(new Uint8Array(data.buffer), { defaultHeapSize: 1024 * 1024 * 256 });
             const outBuf = decompressed.slice().buffer;
             self.postMessage({ 
                 id: data.id, 
@@ -50,7 +50,7 @@ self.onmessage = async (e) => {
             let rawData = new Uint8Array(buffer);
             
             if (rawData.length >= 4 && rawData[0] === 0x28 && rawData[1] === 0xB5 && rawData[2] === 0x2F && rawData[3] === 0xFD) {
-                rawData = zstdDecompress(rawData, { defaultHeapSize: 1024 * 1024 * 32 });
+                rawData = zstdDecompress(rawData, { defaultHeapSize: 1024 * 1024 * 256 });
             }
             
             let table: any = null;
@@ -64,10 +64,7 @@ self.onmessage = async (e) => {
                 if (globalSchemaBuffer) {
                     try {
                         let schemaToUse = globalSchemaBuffer;
-                        const ipcBuffer = new Uint8Array(schemaToUse.length + rawData.length);
-                        ipcBuffer.set(schemaToUse, 0);
-                        ipcBuffer.set(rawData, schemaToUse.length);
-                        const table2 = tableFromIPC(ipcBuffer);
+                        const table2 = tableFromIPC([schemaToUse, rawData]);
                         if (table2 && table2.numRows > 0) {
                             table = table2;
                         }

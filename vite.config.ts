@@ -2,6 +2,7 @@ import { defineConfig } from 'vite';
 
 export default defineConfig({
   root: './',
+  assetsInclude: ['**/*.arrowtiles', '**/*.parquet', '**/*.duckdb'],
   server: {
     port: 5173,
     host: true,
@@ -11,7 +12,7 @@ export default defineConfig({
       allow: ['.']
     },
     watch: {
-      ignored: ['.gemini/**', '.system_generated/**', '**/.gemini/**', '**/.system_generated/**', '**/*.pmtiles']
+      ignored: ['.logs/**', 'research/**', '**/*.parquet', '**/s3_cache/**', '**/data/**', '**/dist/**', '**/*.arrowtiles', '.gemini/**', '.system_generated/**', '**/.gemini/**', '**/.system_generated/**']
     }
   },
   optimizeDeps: {

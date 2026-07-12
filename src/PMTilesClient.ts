@@ -1,6 +1,7 @@
-import { PMTiles, Compression } from 'pmtiles';
+import { PMTiles, Compression, FileSource } from 'pmtiles';
 import PQueue from 'p-queue';
 import ArrowWorker from './pmtiles.worker?worker';
+import { tableFromIPC } from 'apache-arrow';
 
 export interface BoundingBox {
     minX: number;
@@ -16,6 +17,11 @@ export interface TileData {
     needsUpdate?: boolean;
 }
 
+export interface SchemaField {
+    name: string;
+    type: string;
+}
+
 export class PMTilesClient {
     private pmtiles: PMTiles;
     private rootBounds: BoundingBox;
@@ -26,6 +32,7 @@ export class PMTilesClient {
     private loadingTiles = new Set<string>();
     private currentlyVisibleIds = new Set<string>();
     private lastSeenTimestamp = new Map<string, number>();
+    private knownEmptyTiles = new Set<string>();
     private maxCacheSize: number;
     private queue = new PQueue({ concurrency: 6 });
     private allWorkers: Worker[] = [];
@@ -79,7 +86,7 @@ export class PMTilesClient {
     private layerPmtiles: PMTiles[] = [];
     private currentMaxZ: number = 0;
 
-    constructor(coreUrl: string, layerUrls: string[], rootBounds: BoundingBox, maxCacheSize: number = 200, schemaBuffer: Uint8Array | null) {
+    constructor(coreSource: string | File, layerUrls: string[], rootBounds: BoundingBox, maxCacheSize: number = 200, schemaBuffer: Uint8Array | null) {
         this.rootBounds = rootBounds;
         this.maxCacheSize = maxCacheSize;
         
@@ -116,10 +123,50 @@ export class PMTilesClient {
             throw new Error(`Unsupported compression: ${compression}`);
         };
 
-        this.corePmtiles = new PMTiles(coreUrl, undefined, customDecompress);
+        const createPmtiles = (src: string | File) => {
+            const source = typeof src === 'string' ? src : new FileSource(src);
+            return new PMTiles(source, undefined, customDecompress);
+        };
+
+        this.corePmtiles = createPmtiles(coreSource);
         for (const lUrl of layerUrls) {
-            this.layerPmtiles.push(new PMTiles(lUrl, undefined, customDecompress));
+            this.layerPmtiles.push(createPmtiles(lUrl));
         }
+    }
+
+    public async getSchema(): Promise<SchemaField[]> {
+        const metadata: any = await this.corePmtiles.getMetadata();
+        if (!metadata || !metadata.arrow_schema) {
+            throw new Error("No arrow_schema found in PMTiles metadata");
+        }
+        
+        const binaryString = atob(metadata.arrow_schema);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+        }
+
+        // Just creating a table from the IPC schema bytes is enough to read the schema!
+        const table = tableFromIPC([bytes]);
+        
+        return table.schema.fields.map(f => ({
+            name: f.name,
+            type: String(f.type)
+        }));
+    }
+
+    public destroy() {
+        for (const worker of this.allWorkers) {
+            worker.terminate();
+        }
+        this.allWorkers = [];
+        this.idleWorkers = [];
+        this.activeTiles.clear();
+        this.loadingTiles.clear();
+        for (const abort of this.abortControllers.values()) {
+            abort.abort();
+        }
+        this.abortControllers.clear();
     }
 
     private handleWorkerMessage(e: MessageEvent, worker: Worker) {
@@ -236,10 +283,10 @@ export class PMTilesClient {
 
     public getVisibleTiles(worldFrustum: BoundingBox, z: number): TileData[] {
         const frustumBox: BoundingBox = {
-             minX: (worldFrustum.minX + 2) / 4.0,
-             maxX: (worldFrustum.maxX + 2) / 4.0,
-             minY: (1.0 - worldFrustum.maxY) / 2.0,
-             maxY: (1.0 - worldFrustum.minY) / 2.0
+             minX: (worldFrustum.minX - this.rootBounds.minX) / (this.rootBounds.maxX - this.rootBounds.minX),
+             maxX: (worldFrustum.maxX - this.rootBounds.minX) / (this.rootBounds.maxX - this.rootBounds.minX),
+             minY: (this.rootBounds.maxY - worldFrustum.maxY) / (this.rootBounds.maxY - this.rootBounds.minY),
+             maxY: (this.rootBounds.maxY - worldFrustum.minY) / (this.rootBounds.maxY - this.rootBounds.minY)
         };
 
         this.currentlyVisibleIds.clear();
@@ -247,30 +294,53 @@ export class PMTilesClient {
         // 1. Gather all potentially visible tiles across all LOD levels
         const candidateTiles: { cz: number, x: number, y: number, key: string, score: number }[] = [];
         
-        for (let cz = 0; cz <= z; cz++) {
+        // Compute world center for distance scoring
+        const centerX = (worldFrustum.minX + worldFrustum.maxX) / 2.0;
+        const centerY = (worldFrustum.minY + worldFrustum.maxY) / 2.0;
+
+        const traverse = (cz: number, x: number, y: number) => {
+            if (cz > z) return;
+            const key = `${cz}/${x}/${y}`;
+            
+            // Early terminating recursive descent: if a tile is known empty, its children are empty!
+            if (this.knownEmptyTiles.has(key)) return;
+            
             const numTiles = 1 << cz;
             const width = (this.rootBounds.maxX - this.rootBounds.minX) / numTiles;
             const height = (this.rootBounds.maxY - this.rootBounds.minY) / numTiles;
-
-            const startX = Math.max(0, Math.floor((worldFrustum.minX - this.rootBounds.minX) / width));
-            const endX = Math.min(numTiles - 1, Math.floor((worldFrustum.maxX - this.rootBounds.minX) / width));
-            const startY = Math.max(0, Math.floor((this.rootBounds.maxY - worldFrustum.maxY) / height));
-            const endY = Math.min(numTiles - 1, Math.floor((this.rootBounds.maxY - worldFrustum.minY) / height));
-
-            const centerX = (startX + endX) / 2.0;
-            const centerY = (startY + endY) / 2.0;
-
-            for (let x = startX; x <= endX; x++) {
-                for (let y = startY; y <= endY; y++) {
-                    const key = `${cz}/${x}/${y}`;
-                    // Score = DistanceToCenter + (Z_Level * DepthPenalty)
-                    // Smaller score = higher priority
-                    const dist = Math.sqrt(Math.pow(x - centerX, 2) + Math.pow(y - centerY, 2));
-                    const score = dist + (cz * 0.5); 
-                    candidateTiles.push({ cz, x, y, key, score });
-                }
+            
+            const minX = this.rootBounds.minX + x * width;
+            const maxX = this.rootBounds.minX + (x + 1) * width;
+            const minY = this.rootBounds.maxY - (y + 1) * height; // Web mercator Y is inverted
+            const maxY = this.rootBounds.maxY - y * height;
+            
+            // Frustum Cull
+            if (maxX < worldFrustum.minX || minX > worldFrustum.maxX || maxY < worldFrustum.minY || minY > worldFrustum.maxY) {
+                return; 
             }
-        }
+            
+            const tileCenterX = (minX + maxX) / 2.0;
+            const tileCenterY = (minY + maxY) / 2.0;
+            
+            // We use normalized distance (0-1) across the whole root bounds
+            const dist = Math.sqrt(
+                Math.pow((tileCenterX - centerX) / (this.rootBounds.maxX - this.rootBounds.minX), 2) + 
+                Math.pow((tileCenterY - centerY) / (this.rootBounds.maxY - this.rootBounds.minY), 2)
+            );
+            
+            const score = dist + (cz * 0.5);
+            candidateTiles.push({ cz, x, y, key, score });
+            
+            if (cz < z) {
+                traverse(cz + 1, x * 2, y * 2);
+                traverse(cz + 1, x * 2 + 1, y * 2);
+                traverse(cz + 1, x * 2, y * 2 + 1);
+                traverse(cz + 1, x * 2 + 1, y * 2 + 1);
+            }
+        };
+
+        // Start recursion at root tile (0, 0, 0)
+        traverse(0, 0, 0);
 
         // 2. Sort candidates by score ascending (lowest score = highest priority)
         candidateTiles.sort((a, b) => a.score - b.score);
@@ -458,6 +528,9 @@ export class PMTilesClient {
                 this.activeTiles.set(key, tileData);
                 this.cacheChanged = true;
                 if (this.onTileLoaded) this.onTileLoaded(tileData);
+            } else {
+                // If core tile is missing, mark as known empty to cull recursion
+                this.knownEmptyTiles.add(key);
             }
         } catch (e: any) {
             if (e.name === 'AbortError') {

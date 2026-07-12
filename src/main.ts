@@ -9,11 +9,11 @@ import {
   fwidth, hash, instanceIndex, Discard, max, min, userData, uint, mix,
   log2, clamp, pow, uniformArray, uniform, select, length, floor, varying
 } from 'three/tsl';
-import { Renderer } from './core/Renderer';
-import { PMTilesClient } from './PMTilesClient';
-import type { BoundingBox, TileData } from './PMTilesClient';
+import { Renderer } from './core/Renderer.ts';
+import { PMTilesClient } from './PMTilesClient.ts';
+import type { BoundingBox, TileData } from './PMTilesClient.ts';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-const TILE_SERVER_URL = `/gaia_full.arrowtiles`;
+const TILE_SERVER_URL = "/gaia_full.arrowtiles";
 
 
 import { Scatterplot } from './Scatterplot';
@@ -53,77 +53,207 @@ async function init() {
   
   const scatterplot = new Scatterplot(rendererWrapper.scene, rendererWrapper, rootBounds);
   
-  const gui = new GUI({ title: 'Visualization Controls' });
-  const state = {
-      mode: 'Gaia Baseline',
-      colorField: 'bp_rp',
-      colorScale: 'viridis',
-      xField: 'x_u16',
-      yField: 'y_u16',
-      sizeField: 'abs_m'
-  };
-
-  const getDomainForField = (field: string): [number, number] => {
-      if (field === 'bp_rp') return [-0.5, 2.5];
-      if (field === 'abs_m') return [-5.0, 20.0];
-      if (field === 'x_u16' || field === 'y_u16') return [0.0, 1.0];
-      if (field === 'parallax') return [-2.0, 5.0];
-      if (field === 'pmra' || field === 'pmdec') return [-10.0, 10.0];
-      return [0.0, 100.0];
-  };
-
-  const getSizeDomainForField = (field: string): [number, number] => {
-      if (field === 'abs_m' || field === 'magnitude') return [20.0, 0.0]; // Dimmer stars = smaller size!
-      return getDomainForField(field);
-  };
-
-  const updateConfig = () => {
-      scatterplot.modeUniform.value = state.mode === 'Gaia Baseline' ? 0.0 : 1.0;
-      const activeCols = scatterplot.updateEncoding({
-          x: { field: state.xField, transform: 'linear', domain: [0, 1], range: [-2, 2] },
-          y: { field: state.yField, transform: 'linear', domain: [0, 1], range: [1, -1] },
-          color: { field: state.colorField, range: state.colorScale as any, domain: getDomainForField(state.colorField) },
-          size: { field: state.sizeField, domain: getSizeDomainForField(state.sizeField), range: [0.5, 3.0] }
-      });
-      // Important: Tell TileManager which columns to extract!
-      (window as any).tileManagerInstance?.setRequestedColumns(activeCols);
-  };
+  let gui: GUI | null = null;
+  let tileManager: PMTilesClient | null = null;
   
-  const modeFolder = gui.addFolder('Visualization Mode');
-  modeFolder.add(state, 'mode', ['Gaia Baseline', 'Chart Mode']).onChange(updateConfig);
-
-  const chartFolder = gui.addFolder('Chart Mode Settings');
-  const fields = ['x_u16', 'y_u16', 'bp_rp', 'abs_m', 'parallax', 'pmra', 'pmdec', 'radial_velocity', 'teff_gspphot']; // Gaia fields
-  chartFolder.add(state, 'colorField', fields).name('Color By').onChange(updateConfig);
-  chartFolder.add(state, 'colorScale', ['viridis', 'rdbu']).name('Color Scale').onChange(updateConfig);
-  chartFolder.add(state, 'sizeField', fields).name('Size By').onChange(updateConfig);
-  chartFolder.add(state, 'xField', fields).name('X Axis').onChange(updateConfig);
-  chartFolder.add(state, 'yField', fields).name('Y Axis').onChange(updateConfig);
-
-  uiText.innerHTML = `Fetching embedded .arrowtiles schema...`;
-  
-  const tempPmtiles = new PMTiles(TILE_SERVER_URL);
-  const metadata = await tempPmtiles.getMetadata();
-  let schemaBuffer: Uint8Array | null = null;
-  
-  if (metadata && metadata.arrow_schema) {
-      const binaryString = atob(metadata.arrow_schema);
-      schemaBuffer = new Uint8Array(binaryString.length);
-      for (let i = 0; i < binaryString.length; i++) {
-          schemaBuffer[i] = binaryString.charCodeAt(i);
+  async function loadDataset(source: string | File) {
+      if (gui) {
+          gui.destroy();
+          gui = null;
       }
-      console.log("Loaded embedded schema from PMTiles metadata!");
-  } else {
-      console.warn("No embedded arrow_schema found in PMTiles metadata.");
+      
+      uiText.innerHTML = `Loading dataset schema...`;
+      
+      if (tileManager) {
+          tileManager.destroy();
+      }
+      
+      const { FileSource } = await import('pmtiles');
+      const tempPmtiles = new PMTiles(typeof source === 'string' ? source : new FileSource(source));
+      const metadata: any = await tempPmtiles.getMetadata();
+      
+      let schemaBuffer: Uint8Array | null = null;
+      if (metadata && metadata.arrow_schema) {
+          const binaryString = atob(metadata.arrow_schema);
+          schemaBuffer = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+              schemaBuffer[i] = binaryString.charCodeAt(i);
+          }
+          console.log("Loaded embedded schema from PMTiles metadata!");
+      } else {
+          console.warn("No embedded arrow_schema found in PMTiles metadata.");
+      }
+
+      let embeddedConfig: any = {};
+      // For Gaia, since we haven't rebuilt it with stats, provide some sensible fallbacks
+      const sourceName = typeof source === 'string' ? source : source.name;
+      const isGaia = sourceName.includes('gaia');
+      const gaiaFallbacks = {
+          abs_m: { min: -5.0, max: 20.0 },
+          bp_rp: { min: -1.0, max: 5.0 },
+          radial_velocity: { min: -200.0, max: 200.0 },
+          teff_gspphot: { min: 2000.0, max: 12000.0 },
+          parallax: { min: -5.0, max: 20.0 }
+      };
+
+      if (metadata) {
+          // Rust ArrowTilesPacker flattens the JSON config into top-level PMTiles metadata keys
+          embeddedConfig = {
+              mode: metadata.mode,
+              colorField: metadata.colorField,
+              colorMin: metadata.colorMin !== undefined ? parseFloat(metadata.colorMin) : undefined,
+              colorMax: metadata.colorMax !== undefined ? parseFloat(metadata.colorMax) : undefined,
+              sizeField: metadata.sizeField,
+              sizeMin: metadata.sizeMin !== undefined ? parseFloat(metadata.sizeMin) : undefined,
+              sizeMax: metadata.sizeMax !== undefined ? parseFloat(metadata.sizeMax) : undefined,
+              colorScale: metadata.colorScale,
+              xField: metadata.xField,
+              yField: metadata.yField,
+              stats: metadata.stats ? JSON.parse(metadata.stats) : (isGaia ? gaiaFallbacks : undefined)
+          };
+          console.log("Loaded embedded config from PMTiles metadata:", embeddedConfig);
+      }
+
+      const dynamicRootBounds = isGaia 
+          ? { minX: -2.0, maxX: 2.0, minY: -1.0, maxY: 1.0 }
+          : { minX: -1.0, maxX: 1.0, minY: -1.0, maxY: 1.0 };
+
+      tileManager = new PMTilesClient(source, [], dynamicRootBounds, 250, schemaBuffer);
+      scatterplot.setRootBounds(dynamicRootBounds);
+      (window as any).tileManagerInstance = tileManager;
+      
+      let schemaFields: string[] = [];
+      try {
+          const schema = await tileManager.getSchema();
+          schemaFields = schema.map(f => f.name).filter(n => n !== 'x_u16' && n !== 'y_u16');
+      } catch (err) {
+          console.warn("Failed to parse schema, falling back to empty fields list", err);
+      }
+      
+      const allFields = ['x_u16', 'y_u16', ...schemaFields];
+
+      gui = new GUI({ title: 'Visualization Controls' });
+      const defaultField = schemaFields.includes('sort_metric') ? 'sort_metric' : (schemaFields.length > 0 ? schemaFields[0] : 'x_u16');
+      
+      const state = {
+          mode: embeddedConfig.mode || (isGaia ? 'Gaia Baseline' : 'Chart Mode'),
+          colorField: embeddedConfig.colorField || (isGaia ? 'bp_rp' : defaultField),
+          colorMin: embeddedConfig.colorMin ?? (isGaia ? -1.0 : 0.0),
+          colorMax: embeddedConfig.colorMax ?? (isGaia ? 4.0 : 100.0),
+          colorScale: embeddedConfig.colorScale || 'viridis',
+          xField: embeddedConfig.xField || 'x_u16',
+          yField: embeddedConfig.yField || 'y_u16',
+          sizeField: embeddedConfig.sizeField || defaultField,
+          sizeMin: embeddedConfig.sizeMin ?? 0.0,
+          sizeMax: embeddedConfig.sizeMax ?? (isGaia ? 2000.0 : 100.0)
+      };
+
+      const updateConfig = () => {
+          if (!tileManager) return;
+          scatterplot.modeUniform.value = state.mode === 'Gaia Baseline' ? 0.0 : 1.0;
+          const xRange = isGaia ? [-2, 2] : [-1, 1];
+          const activeCols = scatterplot.updateEncoding({
+              x: { field: state.xField, transform: 'linear', domain: [0, 1], range: xRange },
+              y: { field: state.yField, transform: 'linear', domain: [0, 1], range: [1, -1] },
+              color: { field: state.colorField, range: state.colorScale as any, domain: [state.colorMin, state.colorMax] },
+              size: { field: state.sizeField, domain: [state.sizeMin, state.sizeMax], range: [0.5, 3.0] }
+          });
+          tileManager.setRequestedColumns(activeCols);
+      };
+      
+      const availableModes = embeddedConfig.availableModes || (embeddedConfig.mode === 'Gaia Baseline' || isGaia ? ['Gaia Baseline', 'Chart Mode'] : ['Chart Mode']);
+      
+      const modeFolder = gui.addFolder('Visualization Mode');
+      modeFolder.add(state, 'mode', availableModes).name('mode').onChange(updateConfig);
+
+      let colorMinCtrl: any;
+      let colorMaxCtrl: any;
+      let sizeMinCtrl: any;
+      let sizeMaxCtrl: any;
+
+      const handleColorFieldChange = (newField: string) => {
+          if (embeddedConfig.stats && embeddedConfig.stats[newField]) {
+              const bounds = embeddedConfig.stats[newField];
+              state.colorMin = bounds.min;
+              state.colorMax = bounds.max;
+              if (colorMinCtrl) { colorMinCtrl.min(bounds.min).max(bounds.max); }
+              if (colorMaxCtrl) { colorMaxCtrl.min(bounds.min).max(bounds.max); }
+              gui.controllersRecursive().forEach(c => c.updateDisplay());
+          }
+          updateConfig();
+      };
+      
+      const handleSizeFieldChange = (newField: string) => {
+          if (embeddedConfig.stats && embeddedConfig.stats[newField]) {
+              const bounds = embeddedConfig.stats[newField];
+              state.sizeMin = bounds.min;
+              state.sizeMax = bounds.max;
+              if (sizeMinCtrl) { sizeMinCtrl.min(bounds.min).max(bounds.max); }
+              if (sizeMaxCtrl) { sizeMaxCtrl.min(bounds.min).max(bounds.max); }
+              gui.controllersRecursive().forEach(c => c.updateDisplay());
+          }
+          updateConfig();
+      };
+
+      const chartFolder = gui.addFolder('Chart Mode Settings');
+      chartFolder.add(state, 'colorField', allFields).name('Color By').onChange(handleColorFieldChange);
+      chartFolder.add(state, 'colorScale', ['viridis', 'plasma', 'magma', 'inferno', 'rdbu']).name('Color Scale').onChange(updateConfig);
+      
+      // Initialize with bounds if we have them for the default field
+      let initColorBounds = { min: 0.0, max: isGaia ? 2000.0 : 100.0 };
+      if (embeddedConfig.stats && embeddedConfig.stats[state.colorField]) {
+          initColorBounds = embeddedConfig.stats[state.colorField];
+      }
+      colorMinCtrl = chartFolder.add(state, 'colorMin', initColorBounds.min, initColorBounds.max).name('Color Min').onChange(updateConfig);
+      colorMaxCtrl = chartFolder.add(state, 'colorMax', initColorBounds.min, initColorBounds.max).name('Color Max').onChange(updateConfig);
+
+      
+      let initSizeBounds = { min: 0.0, max: isGaia ? 2000.0 : 100.0 };
+      if (embeddedConfig.stats && embeddedConfig.stats[state.sizeField]) {
+          initSizeBounds = embeddedConfig.stats[state.sizeField];
+      }
+      chartFolder.add(state, 'sizeField', allFields).name('Size By').onChange(handleSizeFieldChange);
+      sizeMinCtrl = chartFolder.add(state, 'sizeMin', initSizeBounds.min, initSizeBounds.max).name('Size Min').onChange(updateConfig);
+      sizeMaxCtrl = chartFolder.add(state, 'sizeMax', initSizeBounds.min, initSizeBounds.max).name('Size Max').onChange(updateConfig);
+      
+      chartFolder.add(state, 'xField', allFields).name('X Axis').onChange(updateConfig);
+      chartFolder.add(state, 'yField', allFields).name('Y Axis').onChange(updateConfig);
+
+      // Connect TileManager's Cache Eviction to Scatterplot's GPU slots
+      tileManager.onTileUnloaded = (tileId: string) => {
+          scatterplot.unloadTile(tileId);
+      };
+
+      updateConfig();
+      uiText.innerHTML = `WebGPU is supported!<br/>Streaming Quadtree Tiles...`;
   }
 
-  const tileManager = new PMTilesClient(TILE_SERVER_URL, [], rootBounds, 250, schemaBuffer);
-  window.tileManagerInstance = tileManager;
-  
-  // Apply initial generic config so Scatterplot and Worker extract the right columns
-  updateConfig();
-  
-  uiText.innerHTML = `WebGPU is supported!<br/>Streaming Quadtree Tiles...`;
+  // Setup Drag and Drop
+  const dropOverlay = document.getElementById('drop-overlay');
+  if (dropOverlay) {
+      window.addEventListener('dragover', (e) => {
+          e.preventDefault();
+          dropOverlay.style.display = 'flex';
+      });
+      window.addEventListener('dragleave', (e) => {
+          e.preventDefault();
+          if (e.clientX === 0 && e.clientY === 0) {
+              dropOverlay.style.display = 'none';
+          }
+      });
+      window.addEventListener('drop', (e) => {
+          e.preventDefault();
+          dropOverlay.style.display = 'none';
+          if (e.dataTransfer?.files.length) {
+              const file = e.dataTransfer.files[0];
+              if (file.name.endsWith('.arrowtiles')) {
+                  loadDataset(file).catch(console.error);
+              }
+          }
+      });
+  }
+
+  await loadDataset(TILE_SERVER_URL);
 
   const copyBtn = document.getElementById('copy-metrics-btn');
   if (copyBtn) {
@@ -147,11 +277,6 @@ async function init() {
 
   const mouse = new THREE.Vector2();
 
-  // Connect TileManager's Cache Eviction to Scatterplot's GPU slots
-  tileManager.onTileUnloaded = (tileId: string) => {
-      scatterplot.unloadTile(tileId);
-  };
-
   const lastCameraMatrix = new THREE.Matrix4();
   let lastZoom = -1;
   let activeVisibleTiles: TileData[] = [];
@@ -165,6 +290,7 @@ async function init() {
 
   rendererWrapper.renderer.setAnimationLoop(() => {
     try {
+      if (!tileManager) return;
 
       const t0 = performance.now();
       

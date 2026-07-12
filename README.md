@@ -32,6 +32,34 @@ The application will launch on `http://localhost:5173`.
 
 ---
 
+## 📊 Dataset Showcases
+
+### ESA Gaia Dataset
+**Raw Data**: Astronomical catalogue mapping the positions and movements of stars in the Milky Way galaxy.
+**Prepared Data**: `gaia_full.arrowtiles` (~1.8 billion rows, 15.8 GB)
+**Potential columns for visualization**:
+- **X & Y Coordinates**: `ra`, `dec` (Right Ascension, Declination)
+- **Point Size**: `abs_m` (Absolute Magnitude)
+- **Color**: `bp_rp` (Color Index) or `teff_gspphot` (Temperature)
+- **Label**: `source_id`
+
+![Gaia Performance 1](assets/performance_1.png)
+![Gaia Performance 2](assets/performance_2.png)
+![Gaia Performance 3](assets/performance_3.png)
+
+### LMSys Chat Conversations Dataset
+**Raw Data**: Conversations from AI chat systems.
+**Prepared Data**: `lmsys_with_planar_embeddings_pca500.parquet` (2,835,490 rows, 38 columns)
+**Potential columns for visualization**:
+- **X & Y Coordinates**: `x_umap`, `y_umap`
+- **Point Size**: `num_of_tokens`
+- **Color**: `model`
+- **Label**: `content`
+
+![LMSys Performance](assets/performance_4.png)
+
+---
+
 ## 🏗️ Frontend Architecture
 
 The system operates on a multi-threaded pipeline designed to minimize CPU bottlenecks during rendering and maximize data throughput over HTTP.
@@ -85,6 +113,16 @@ To prevent extreme additive blowouts and preserve 60 FPS when looking at the den
 4. **Corrected Galactic Projection:** Applied WebGPU inverted-Y rendering fixes to ensure the final visual projection matches standard astronomical orientations.
 5. **Zoom-Linked Dynamic Cluster Boosting:** Replaced arbitrary max-tile budgeting with a geometrically accurate mapping between the camera frustum and Quadtree Z-levels. Additionally, the WebGPU shader selectively isolates **faint cluster stars** and applies an `easeOut` curve as the camera zooms into them.
 6. **Multi-Threaded Decompression Pool:** Because Zstandard decompression is extremely CPU-heavy, decompressing 100+ dense tiles simultaneously caused the main browser thread to lock up. We implemented a dynamic Round-Robin Web Worker pool scaled to `navigator.hardwareConcurrency`. PMTiles decompression and Apache Arrow IPC parsing are now entirely off-main-thread, restoring 60 FPS UI interactivity even during massive network fetches.
+
+---
+
+## 🚀 Last Major Updates
+
+1. **DuckDB Auto-Bounding & Data Pipeline**: The pipeline was successfully overhauled to eliminate hardcoded boundaries. `build_generic` now dynamically inspects schema and serializes global `min`/`max` stats into a custom JSON metadata block inside the `.arrowtiles` archive.
+2. **WebGPU Shader Architecture Fixes**: The shader is now fully dynamic. It differentiates between 'Gaia Baseline' rendering and a generic 'Chart Mode', while the Web Worker leverages `tableFromIPC([schemaToUse, rawData])` for optimized chunked buffer parsing.
+3. **Drag-and-Drop Dataset Swapping**: The frontend can now seamlessly swap datasets at runtime by dragging and dropping any `.arrowtiles` file directly into the browser, triggering proper memory teardown and GPU buffer clearing before reloading.
+4. **Dynamic Frontend UI**: The GUI is completely data-driven. It extracts the custom metadata injected by DuckDB to dynamically populate dropdowns with available columns and instantly syncs bounds on the UI sliders and WebGPU uniforms.
+5. **Environment & Tooling Resilience**: Hardened Vite configurations to ignore massive data directories (e.g., `s3_cache/`, `archive/`, `*.arrowtiles`), entirely eliminating previous out-of-memory crashes during development.
 
 ---
 
