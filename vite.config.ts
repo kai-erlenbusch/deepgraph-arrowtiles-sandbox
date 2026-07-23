@@ -1,7 +1,6 @@
 import { defineConfig } from 'vite';
 
 export default defineConfig({
-  root: './',
   assetsInclude: ['**/*.arrowtiles', '**/*.parquet', '**/*.duckdb'],
   server: {
     port: 5173,

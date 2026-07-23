@@ -48,21 +48,24 @@ export function initUI() {
 
   const selectX = document.getElementById('select-x') as HTMLSelectElement;
   const selectY = document.getElementById('select-y') as HTMLSelectElement;
+  const checkFlipY = document.getElementById('check-flip-y') as HTMLInputElement;
   
   const updateEncoding = () => {
     const xVal = selectX.value;
     const yVal = selectY.value;
+    const flipY = checkFlipY.checked;
     
     let config: any = {
       x: { field: xVal, transform: 'literal' },
-      y: { field: yVal, transform: 'literal' }
+      y: { field: yVal, transform: 'literal' },
+      flipY: flipY
     };
     
     if (xVal === 'x_u16') config.x = { field: 'x_u16', domain: [0, 1], range: [-2, 2], transform: 'linear' };
-    if (yVal === 'y_u16') config.y = { field: 'y_u16', domain: [0, 1], range: [1, -1], transform: 'linear' };
+    if (yVal === 'y_u16') config.y = { field: 'y_u16', domain: [0, 1], range: flipY ? [-1, 1] : [1, -1], transform: 'linear' };
     
     if (xVal === 'bp_rp') config.x = { field: 'bp_rp', domain: [-2, 4], range: [-2, 2], transform: 'linear' };
-    if (yVal === 'abs_m') config.y = { field: 'abs_m', domain: [15, -5], range: [-2, 2], transform: 'linear' };
+    if (yVal === 'abs_m') config.y = { field: 'abs_m', domain: [15, -5], range: flipY ? [-2, 2] : [2, -2], transform: 'linear' };
 
     const w = window as any;
     if (w.updateMap) w.updateMap(config);
@@ -70,6 +73,7 @@ export function initUI() {
 
   selectX.addEventListener('change', updateEncoding);
   selectY.addEventListener('change', updateEncoding);
+  checkFlipY.addEventListener('change', updateEncoding);
 
   document.getElementById('preset-sky')?.addEventListener('click', () => {
     selectX.value = 'x_u16';

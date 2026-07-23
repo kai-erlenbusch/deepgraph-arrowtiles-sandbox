@@ -40,6 +40,41 @@ self.onmessage = async (e) => {
         return;
     }
 
+    if (data.action === 'decompress_gzip') {
+        try {
+            const ds = new DecompressionStream('gzip');
+            const response = new Response(data.buffer);
+            const decompressedStream = response.body!.pipeThrough(ds);
+            const decompressedBuffer = await new Response(decompressedStream).arrayBuffer();
+            self.postMessage({ 
+                id: data.id, 
+                action: 'decompress_gzip', 
+                buffer: decompressedBuffer 
+            }, { transfer: [decompressedBuffer] } as any);
+        } catch (error: any) {
+            self.postMessage({ id: data.id, action: 'decompress_gzip', error: error.stack || error.message || "Unknown error" });
+        }
+        return;
+    }
+
+    if (data.action === 'get_schema') {
+        try {
+            if (!data.schemaBuffer) {
+                throw new Error("No schema buffer provided");
+            }
+            const bytes = new Uint8Array(data.schemaBuffer);
+            const table = tableFromIPC([bytes]);
+            const fields = table.schema.fields.map(f => ({
+                name: f.name,
+                type: String(f.type)
+            }));
+            self.postMessage({ id: data.id, action: 'get_schema', fields });
+        } catch (error: any) {
+            self.postMessage({ id: data.id, action: 'get_schema', error: error.stack || error.message || "Unknown error" });
+        }
+        return;
+    }
+
     // Main data parsing
     const { key, buffers, requestedColumns, pooledColumns } = data;
     if (!key || !buffers) return; // Skip if this doesn't look like a tile decode request
@@ -104,7 +139,7 @@ self.onmessage = async (e) => {
                     buf = new Float32Array(numRows);
                 }
                 for (let i = 0; i < numRows; i++) {
-                    buf[i] = raw[i] / 65535.0;
+                    buf[i] = (raw[i] + Math.random() - 0.5) / 65535.0;
                 }
                 return buf.buffer;
             };

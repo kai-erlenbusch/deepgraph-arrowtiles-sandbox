@@ -113,6 +113,8 @@ To prevent extreme additive blowouts and preserve 60 FPS when looking at the den
 4. **Corrected Galactic Projection:** Applied WebGPU inverted-Y rendering fixes to ensure the final visual projection matches standard astronomical orientations.
 5. **Zoom-Linked Dynamic Cluster Boosting:** Replaced arbitrary max-tile budgeting with a geometrically accurate mapping between the camera frustum and Quadtree Z-levels. Additionally, the WebGPU shader selectively isolates **faint cluster stars** and applies an `easeOut` curve as the camera zooms into them.
 6. **Multi-Threaded Decompression Pool:** Because Zstandard decompression is extremely CPU-heavy, decompressing 100+ dense tiles simultaneously caused the main browser thread to lock up. We implemented a dynamic Round-Robin Web Worker pool scaled to `navigator.hardwareConcurrency`. PMTiles decompression and Apache Arrow IPC parsing are now entirely off-main-thread, restoring 60 FPS UI interactivity even during massive network fetches.
+7. **Telemetry & SLO Monitoring:** Integrated real-time performance tracking measuring P95 network and worker load latencies directly in the UI, ensuring the pipeline meets Service Level Objectives (SLOs) without frame drops.
+8. **Coordinate Dithering:** Applied sub-pixel jitter during Web Worker decoding to break up artificial grid patterns caused by deeply quantized 16-bit coordinates at extreme zoom levels, creating a natural, continuous distribution.
 
 ---
 

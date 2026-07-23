@@ -145,7 +145,8 @@ async function init() {
           yField: embeddedConfig.yField || 'y_u16',
           sizeField: embeddedConfig.sizeField || defaultField,
           sizeMin: embeddedConfig.sizeMin ?? 0.0,
-          sizeMax: embeddedConfig.sizeMax ?? (isGaia ? 2000.0 : 100.0)
+          sizeMax: embeddedConfig.sizeMax ?? (isGaia ? 2000.0 : 100.0),
+          flipY: false
       };
 
       const updateConfig = () => {
@@ -153,8 +154,8 @@ async function init() {
           scatterplot.modeUniform.value = state.mode === 'Gaia Baseline' ? 0.0 : 1.0;
           const xRange = isGaia ? [-2, 2] : [-1, 1];
           const activeCols = scatterplot.updateEncoding({
-              x: { field: state.xField, transform: 'linear', domain: [0, 1], range: xRange },
-              y: { field: state.yField, transform: 'linear', domain: [0, 1], range: [1, -1] },
+              x: { field: state.xField, transform: 'linear', domain: [0, 1], range: xRange as [number, number] },
+              y: { field: state.yField, transform: 'linear', domain: [0, 1], range: state.flipY ? [-1, 1] : [1, -1] },
               color: { field: state.colorField, range: state.colorScale as any, domain: [state.colorMin, state.colorMax] },
               size: { field: state.sizeField, domain: [state.sizeMin, state.sizeMax], range: [0.5, 3.0] }
           });
@@ -178,7 +179,7 @@ async function init() {
               state.colorMax = bounds.max;
               if (colorMinCtrl) { colorMinCtrl.min(bounds.min).max(bounds.max); }
               if (colorMaxCtrl) { colorMaxCtrl.min(bounds.min).max(bounds.max); }
-              gui.controllersRecursive().forEach(c => c.updateDisplay());
+              if (gui) gui.controllersRecursive().forEach((c: any) => c.updateDisplay());
           }
           updateConfig();
       };
@@ -190,7 +191,7 @@ async function init() {
               state.sizeMax = bounds.max;
               if (sizeMinCtrl) { sizeMinCtrl.min(bounds.min).max(bounds.max); }
               if (sizeMaxCtrl) { sizeMaxCtrl.min(bounds.min).max(bounds.max); }
-              gui.controllersRecursive().forEach(c => c.updateDisplay());
+              if (gui) gui.controllersRecursive().forEach((c: any) => c.updateDisplay());
           }
           updateConfig();
       };
@@ -198,6 +199,7 @@ async function init() {
       const chartFolder = gui.addFolder('Chart Mode Settings');
       chartFolder.add(state, 'colorField', allFields).name('Color By').onChange(handleColorFieldChange);
       chartFolder.add(state, 'colorScale', ['viridis', 'plasma', 'magma', 'inferno', 'rdbu']).name('Color Scale').onChange(updateConfig);
+      chartFolder.add(state, 'flipY').name('Flip Y').onChange(updateConfig);
       
       // Initialize with bounds if we have them for the default field
       let initColorBounds = { min: 0.0, max: isGaia ? 2000.0 : 100.0 };
@@ -258,7 +260,7 @@ async function init() {
   const copyBtn = document.getElementById('copy-metrics-btn');
   if (copyBtn) {
     copyBtn.addEventListener('click', () => {
-       navigator.clipboard.writeText(uiText.innerText);
+       navigator.clipboard.writeText((uiText as HTMLElement).innerText);
        const origColor = copyBtn.style.color;
        copyBtn.style.color = '#4CAF50';
        setTimeout(() => copyBtn.style.color = origColor, 1000);
@@ -288,7 +290,7 @@ async function init() {
   let perfAccum = { frames: 0, getVisibleTiles: 0, updateTiles: 0, updateCam: 0, render: 0, totalFrame: 0, lastReport: performance.now() };
   let lastPerfReport = { fps: "0", tiles: 0, getVisibleTiles: "0", updateTiles: "0", updateCam: "0", render: "0", totalFrame: "0" };
 
-  rendererWrapper.renderer.setAnimationLoop(() => {
+  rendererWrapper.renderer.setAnimationLoop(async () => {
     try {
       if (!tileManager) return;
 
@@ -300,20 +302,6 @@ async function init() {
       let t1 = performance.now();
       
       // 1. Get frustum bounds from camera (Throttled for box math only)
-      if (!lastCameraMatrix.equals(cam.matrixWorld) || currentZoom !== lastZoom) {
-          lastCameraMatrix.copy(cam.matrixWorld);
-          lastZoom = currentZoom;
-      }
-          
-      const worldFrustum: BoundingBox = {
-         minX: cam.position.x + cam.left / cam.zoom,
-         maxX: cam.position.x + cam.right / cam.zoom,
-         minY: cam.position.y + cam.bottom / cam.zoom,
-         maxY: cam.position.y + cam.top / cam.zoom
-      };
-            const frustumBox: BoundingBox = worldFrustum;
-      
-      const currentMaxIx = scatterplot.calculateMaxIx(cam);
       const camHash = `${cam.position.x},${cam.position.y},${cam.zoom}`;
       
       // 2. Fetch visible tiles only when camera moves or cache updates
@@ -324,10 +312,25 @@ async function init() {
       const currentZ = Math.max(0, Math.min(14, Math.floor(currentZoom) + detailOffset));
       
       if (lastCamHash !== camHash || tileManager.cacheChanged || hasPendingUpdates) {
-          activeVisibleTiles = tileManager.getVisibleTiles(frustumBox, currentZ);
-          t1 = performance.now();
+          if (!lastCameraMatrix.equals(cam.matrixWorld) || currentZoom !== lastZoom) {
+              lastCameraMatrix.copy(cam.matrixWorld);
+              lastZoom = currentZoom;
+          }
+              
+          const worldFrustum: BoundingBox = {
+             minX: cam.position.x + cam.left / cam.zoom,
+             maxX: cam.position.x + cam.right / cam.zoom,
+             minY: cam.position.y + cam.bottom / cam.zoom,
+             maxY: cam.position.y + cam.top / cam.zoom
+          };
+          const frustumBox: BoundingBox = worldFrustum;
+          const currentMaxIx = scatterplot.calculateMaxIx(cam);
           
-          // 3. Update scatterplot geometry and compute nodes
+          activeVisibleTiles = tileManager.getVisibleTiles(frustumBox, currentZ);
+          
+          const t2 = performance.now();
+          
+          // 3. Update active meshes (GPU upload)
           hasPendingUpdates = scatterplot.updateTiles(activeVisibleTiles);
           
           lastCamHash = camHash;
@@ -374,12 +377,20 @@ async function init() {
          const vramMB = (activeVisibleTiles.length * 2.4).toFixed(1);
          let netLatency = "0.0";
          let workerLatency = "0.0";
-         if (tileManager.fetchTelemetry && tileManager.fetchTelemetry.net.length > 0) {
-             const sumNet = tileManager.fetchTelemetry.net.reduce((a: number, b: number) => a + b, 0);
-             const sumWorker = tileManager.fetchTelemetry.worker.reduce((a: number, b: number) => a + b, 0);
-             const avgNet = sumNet / tileManager.fetchTelemetry.net.length;
+         let sloStatusHtml = "";
+         if ((tileManager as any).fetchTelemetry && (tileManager as any).fetchTelemetry.net.length > 0) {
+             const sumNet = (tileManager as any).fetchTelemetry.net.reduce((a: number, b: number) => a + b, 0);
+             const sumWorker = (tileManager as any).fetchTelemetry.worker.reduce((a: number, b: number) => a + b, 0);
+             const avgNet = sumNet / (tileManager as any).fetchTelemetry.net.length;
              netLatency = avgNet.toFixed(1);
-             workerLatency = (sumWorker / tileManager.fetchTelemetry.worker.length).toFixed(1);
+             workerLatency = (sumWorker / (tileManager as any).fetchTelemetry.worker.length).toFixed(1);
+             
+             if ((tileManager as any).fetchTelemetry.p95 > 0) {
+                 const isViolated = (tileManager as any).fetchTelemetry.isSloViolated;
+                 const color = isViolated ? "#ff4444" : "#4CAF50";
+                 const icon = isViolated ? "❌" : "✅";
+                 sloStatusHtml = `<br/><span style="color:${color}; font-weight: bold;">SLO Status (P95 < ${(tileManager as any).fetchTelemetry.sloBudgetMs}ms): ${icon} ${(tileManager as any).fetchTelemetry.p95.toFixed(1)}ms</span>`;
+             }
          }
          
          const perf = lastPerfReport;
@@ -390,6 +401,7 @@ async function init() {
            Tiles active: ${activeVisibleTiles.length} (${vramMB} MB VRAM)<br/>
            Points rendered: ${(totalPoints / 1000000).toFixed(2)} Million<br/>
            Tile load latency: <b>Net</b> ${netLatency}ms | <b>Worker</b> ${workerLatency}ms
+           ${sloStatusHtml}
            <br/><span style="color:#aaa; font-size: 12px;">Culling: ${perf.getVisibleTiles}ms | GPU Upload: ${perf.updateTiles}ms | Render: ${perf.render}ms</span>
          `;
       }
